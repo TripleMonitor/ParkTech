@@ -1,22 +1,30 @@
-   0.1s  welcome    -> SPACE
-   0.9s  ready      -> SPACE
-  15.0s  done       -> SPACE
-  15.9s  ready      -> SPACE
-  29.1s  done       -> SPACE
-  29.9s  ready      -> SPACE
-  43.0s  done       -> SPACE
-  43.8s  ready      -> SPACE
-  56.9s  done       -> SPACE
-  58.4s  results    -> h
-  59.9s  trend      -> SPACE
-  60.7s  welcome    -> SPACE
-  61.5s  ready      -> SPACE
-  74.7s  done       -> SPACE
-  75.6s  ready      -> SPACE
-  88.8s  done       -> SPACE
-  89.6s  ready      -> SPACE
-  94.6s  recording  -> r
-  95.4s  welcome    -> q
+   0.0s  welcome    -> SPACE
+   0.8s  ready      -> SPACE
+  15.3s  done       -> SPACE
+  16.1s  ready      -> SPACE
+  29.5s  done       -> SPACE
+  30.3s  ready      -> SPACE
+  43.4s  done       -> SPACE
+  44.2s  ready      -> SPACE
+  57.3s  done       -> SPACE
+  58.1s  ready      -> SPACE
+  71.2s  done       -> SPACE
+  72.0s  ready      -> SPACE
+  85.1s  done       -> SPACE
+  86.6s  results    -> h
+  88.1s  trend      -> SPACE
+  88.9s  welcome    -> SPACE
+  89.7s  ready      -> SPACE
+ 103.1s  done       -> SPACE
+ 103.9s  ready      -> SPACE
+ 252.1s  done       -> SPACE
+ 252.9s  ready      -> SPACE
+ 266.0s  done       -> SPACE
+ 266.8s  ready      -> SPACE
+ 279.9s  done       -> SPACE
+ 280.7s  ready      -> SPACE
+ 285.7s  recording  -> r
+ 286.5s  welcome    -> q
 
-ran 95.7s, screens captured: 19, caught exceptions: 0, R mid-test: True
+ran 286.5s, screens captured: 27, caught exceptions: 0, R mid-test: True
 GUI SMOKE: PASS

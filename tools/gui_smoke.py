@@ -45,7 +45,6 @@ class Script:
         if a.state == "welcome":
             key = KEY_SPACE if self.sessions_done < 2 else ord("q")
         elif a.state == "ready":
-            self.dev.tremor_on = a.idx == 0     # right-hand tremor only
             key = KEY_SPACE
         elif a.state == "done":
             key = KEY_SPACE
@@ -56,7 +55,7 @@ class Script:
                 self.sessions_done += 1
                 key = KEY_SPACE
         elif a.state == "recording" and self.sessions_done == 1 and not self.restarted_mid_test \
-                and a.idx == 2 and now - a.t_state > 2:
+                and a.idx == 4 and now - a.t_state > 2:
             self.restarted_mid_test = True     # exercise R from the middle of a test
             self.sessions_done += 1
             key = ord("r")

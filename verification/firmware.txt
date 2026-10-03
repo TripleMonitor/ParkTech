@@ -1,0 +1,27 @@
+SWITCH_MODULE=0 BUZZER_PASSIVE=0 LED_COMMON_ANODE=0 LCD_MODE=0  OK  flash 3396 bytes (10%)  RAM 292 bytes (14%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=0 BUZZER_PASSIVE=0 LED_COMMON_ANODE=0 LCD_MODE=1  OK  flash 6368 bytes (19%)  RAM 573 bytes (27%)  warnings: sketch 0, libraries 13
+SWITCH_MODULE=0 BUZZER_PASSIVE=0 LED_COMMON_ANODE=0 LCD_MODE=2  OK  flash 4514 bytes (13%)  RAM 351 bytes (17%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=0 BUZZER_PASSIVE=0 LED_COMMON_ANODE=1 LCD_MODE=0  OK  flash 3416 bytes (10%)  RAM 292 bytes (14%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=0 BUZZER_PASSIVE=0 LED_COMMON_ANODE=1 LCD_MODE=1  OK  flash 6388 bytes (19%)  RAM 573 bytes (27%)  warnings: sketch 0, libraries 13
+SWITCH_MODULE=0 BUZZER_PASSIVE=0 LED_COMMON_ANODE=1 LCD_MODE=2  OK  flash 4534 bytes (14%)  RAM 351 bytes (17%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=0 BUZZER_PASSIVE=1 LED_COMMON_ANODE=0 LCD_MODE=0  OK  flash 4102 bytes (12%)  RAM 309 bytes (15%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=0 BUZZER_PASSIVE=1 LED_COMMON_ANODE=0 LCD_MODE=1  OK  flash 7054 bytes (21%)  RAM 590 bytes (28%)  warnings: sketch 0, libraries 13
+SWITCH_MODULE=0 BUZZER_PASSIVE=1 LED_COMMON_ANODE=0 LCD_MODE=2  OK  flash 5220 bytes (16%)  RAM 368 bytes (17%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=0 BUZZER_PASSIVE=1 LED_COMMON_ANODE=1 LCD_MODE=0  OK  flash 4122 bytes (12%)  RAM 309 bytes (15%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=0 BUZZER_PASSIVE=1 LED_COMMON_ANODE=1 LCD_MODE=1  OK  flash 7074 bytes (21%)  RAM 590 bytes (28%)  warnings: sketch 0, libraries 13
+SWITCH_MODULE=0 BUZZER_PASSIVE=1 LED_COMMON_ANODE=1 LCD_MODE=2  OK  flash 5240 bytes (16%)  RAM 368 bytes (17%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=1 BUZZER_PASSIVE=0 LED_COMMON_ANODE=0 LCD_MODE=0  OK  flash 3396 bytes (10%)  RAM 292 bytes (14%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=1 BUZZER_PASSIVE=0 LED_COMMON_ANODE=0 LCD_MODE=1  OK  flash 6368 bytes (19%)  RAM 573 bytes (27%)  warnings: sketch 0, libraries 13
+SWITCH_MODULE=1 BUZZER_PASSIVE=0 LED_COMMON_ANODE=0 LCD_MODE=2  OK  flash 4514 bytes (13%)  RAM 351 bytes (17%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=1 BUZZER_PASSIVE=0 LED_COMMON_ANODE=1 LCD_MODE=0  OK  flash 3416 bytes (10%)  RAM 292 bytes (14%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=1 BUZZER_PASSIVE=0 LED_COMMON_ANODE=1 LCD_MODE=1  OK  flash 6388 bytes (19%)  RAM 573 bytes (27%)  warnings: sketch 0, libraries 13
+SWITCH_MODULE=1 BUZZER_PASSIVE=0 LED_COMMON_ANODE=1 LCD_MODE=2  OK  flash 4534 bytes (14%)  RAM 351 bytes (17%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=1 BUZZER_PASSIVE=1 LED_COMMON_ANODE=0 LCD_MODE=0  OK  flash 4102 bytes (12%)  RAM 309 bytes (15%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=1 BUZZER_PASSIVE=1 LED_COMMON_ANODE=0 LCD_MODE=1  OK  flash 7054 bytes (21%)  RAM 590 bytes (28%)  warnings: sketch 0, libraries 13
+SWITCH_MODULE=1 BUZZER_PASSIVE=1 LED_COMMON_ANODE=0 LCD_MODE=2  OK  flash 5220 bytes (16%)  RAM 368 bytes (17%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=1 BUZZER_PASSIVE=1 LED_COMMON_ANODE=1 LCD_MODE=0  OK  flash 4122 bytes (12%)  RAM 309 bytes (15%)  warnings: sketch 0, libraries 0
+SWITCH_MODULE=1 BUZZER_PASSIVE=1 LED_COMMON_ANODE=1 LCD_MODE=1  OK  flash 7074 bytes (21%)  RAM 590 bytes (28%)  warnings: sketch 0, libraries 13
+SWITCH_MODULE=1 BUZZER_PASSIVE=1 LED_COMMON_ANODE=1 LCD_MODE=2  OK  flash 5240 bytes (16%)  RAM 368 bytes (17%)  warnings: sketch 0, libraries 0
+pins: PIN_SWITCH=D2, PIN_MIRROR=D13, PIN_BUZZER=D8, PIN_R=D9, PIN_G=D10, PIN_B=D5
+parallel LCD (RS,E,D4..D7): D12, D11, D7, D6, D4, D3
+PIN CHECK: PASS
