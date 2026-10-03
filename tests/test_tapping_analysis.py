@@ -65,3 +65,18 @@ def test_noise_and_dropped_frames_are_tolerated():
 def test_no_hand_at_all():
     f = analyze_tapping([i / FPS for i in range(300)], [None] * 300)
     assert f.hand_visible == 0 and f.n_taps == 0
+
+
+@pytest.mark.parametrize("gap_s", [0.5, 0.8])
+def test_tracking_dropout_is_not_a_hesitation(gap_s):
+    """A perfect 3.5 Hz tapper whose hand MediaPipe loses for a moment (review finding)."""
+    times, dists = taps(rate=3.5)
+    dists = [None if 4.0 <= t < 4.0 + gap_s else d for t, d in zip(times, dists)]
+    f = analyze_tapping(times, dists)
+    assert f.hesitations == 0 and f.interval_cv < 0.1
+    assert f.tracking_lost_s == pytest.approx(gap_s, abs=0.1)
+
+
+def test_real_pause_with_hand_visible_is_still_a_hesitation():
+    f = analyze_tapping(*taps(pauses=(4.0,)))
+    assert f.hesitations == 1 and f.tracking_lost_s == 0

@@ -6,7 +6,7 @@ amplitude is the peak's prominence (how far the fingers opened from closed).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Sequence
 
 import numpy as np
@@ -18,6 +18,7 @@ MIN_TAP_PROMINENCE = 0.15   # normalised units: smaller wiggles aren't taps
 MIN_TAP_GAP_S = 0.08        # faster than ~12 taps/s is jitter
 EDGE_WINDOW_S = 3.0         # decrement = first 3 s vs last 3 s
 HESITATION_FACTOR = 2.0     # interval > 2x median
+MAX_TRACKING_GAP_S = 0.15   # no hand for longer than this = tracking dropout, not the patient
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class TappingFeatures:
     hesitations: int
     hand_visible: float         # fraction of frames with a hand (0..1)
     duration_s: float
+    tracking_lost_s: float = 0.0  # total time in tracking gaps > 0.15 s
     tap_times: tuple = field(default=(), repr=False)
 
 
@@ -63,9 +65,21 @@ def decrement(tap_t: np.ndarray, amps: np.ndarray, duration: float) -> float:
     return float(max(0.0, 1.0 - last.mean() / first.mean()))
 
 
-def rhythm(tap_t: np.ndarray) -> tuple[float, int]:
-    """(interval coefficient of variation, number of hesitations)."""
-    intervals = np.diff(tap_t)
+def tracking_gaps(t_valid: np.ndarray) -> list[tuple[float, float]]:
+    """(start, end) of stretches longer than MAX_TRACKING_GAP_S with no hand."""
+    d = np.diff(t_valid)
+    return [(float(t_valid[i]), float(t_valid[i + 1]))
+            for i in np.flatnonzero(d > MAX_TRACKING_GAP_S)]
+
+
+def rhythm(tap_t: np.ndarray, gaps: Sequence[tuple[float, float]] = ()) -> tuple[float, int]:
+    """(interval coefficient of variation, number of hesitations).
+
+    Intervals that overlap a tracking gap are dropped: the camera lost the
+    hand, so we don't know what the patient did there.
+    """
+    intervals = np.array([b - a for a, b in zip(tap_t[:-1], tap_t[1:])
+                          if not any(a < g1 and g0 < b for g0, g1 in gaps)])
     if len(intervals) < 2:
         return 0.0, 0
     cv = float(intervals.std() / intervals.mean())
@@ -81,15 +95,18 @@ def analyze_tapping(t_s: Sequence[float], dists: Sequence[Optional[float]]) -> T
     if len(valid) < 10 or duration <= 0:
         return _empty(visible, duration)
 
+    t0 = float(t_s[0])
     tv = np.array([v[0] for v in valid], dtype=float)
     dv = np.array([v[1] for v in valid], dtype=float)
+    gaps = [(a - t0, b - t0) for a, b in tracking_gaps(tv)]
+    lost = float(sum(b - a for a, b in gaps))
     tap_t, amps = detect_taps(tv, dv)
-    tap_t = tap_t + (tv[0] - t_s[0])
+    tap_t = tap_t + (tv[0] - t0)
     if len(tap_t) == 0:
-        return _empty(visible, duration)
-    cv, hes = rhythm(tap_t)
+        return replace(_empty(visible, duration), tracking_lost_s=lost)
+    cv, hes = rhythm(tap_t, gaps)
     return TappingFeatures(
         n_taps=len(tap_t), taps_per_sec=len(tap_t) / duration,
         mean_amplitude=float(amps.mean()), decrement=decrement(tap_t, amps, duration),
         interval_cv=cv, hesitations=hes, hand_visible=visible, duration_s=duration,
-        tap_times=tuple(float(x) for x in tap_t))
+        tracking_lost_s=lost, tap_times=tuple(float(x) for x in tap_t))

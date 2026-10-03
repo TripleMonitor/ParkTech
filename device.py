@@ -25,10 +25,11 @@ LCD_WIDTH = 16
 LED_COLOURS = ("G", "Y", "R", "B", "OFF")
 READY_TIMEOUT_S = 4.0
 RETRY_S = 1.5
-MAX_BUFFER = 60 * SAMPLE_HZ   # drop oldest beyond 60 s so a stuck UI can't eat RAM
+MAX_BUFFER = 60 * SAMPLE_HZ   # newest samples are dropped beyond 60 s so a stuck UI can't eat RAM
+WRITE_QUEUE_MAX = 50
 
-# USB vendor IDs: Arduino, Arduino (new), WCH CH340, FTDI, SiLabs CP210x
-ARDUINO_VIDS = {0x2341, 0x2A03, 0x1A86, 0x0403, 0x10C4}
+# Port preference: official Arduino, then CH340 clones, then generic USB-serial chips
+PREFERRED_VIDS = ((0x2341, 0x2A03), (0x1A86,), (0x0403, 0x10C4))
 
 
 class Sample(NamedTuple):
@@ -68,9 +69,10 @@ def _check_led(colour: str) -> None:
 def find_arduino_port() -> Optional[str]:
     from serial.tools import list_ports
     ports = list(list_ports.comports())
-    for p in ports:
-        if p.vid in ARDUINO_VIDS:
-            return p.device
+    for vids in PREFERRED_VIDS:
+        for p in ports:
+            if p.vid in vids:
+                return p.device
     hints = ("arduino", "ch340", "usb serial", "usb-serial", "cp210")
     for p in ports:
         if any(h in (p.description or "").lower() for h in hints):
@@ -81,21 +83,31 @@ def find_arduino_port() -> Optional[str]:
 class ArduinoDevice:
     """Serial link that keeps (re)connecting in a background thread.
 
-    Never raises into the UI: if the board is missing or unplugged, `connected`
-    is False, `status` says why, commands are dropped, and it retries.
+    Never raises into or blocks the UI: commands go through a writer thread;
+    if the board is missing or unplugged, `connected` is False, `status` says
+    why, commands are dropped, and it retries. After a reconnect (the Uno
+    resets) the last LED/LCD state and START are re-sent. `warning` holds a
+    firmware ERROR line or a missing READY, for the UI to show.
     """
 
     def __init__(self, port: Optional[str] = None):
         self._want_port = port
         self.port = port or "?"
         self._samples: "queue.Queue[Sample]" = queue.Queue()
+        self._writes: "queue.Queue[str]" = queue.Queue(maxsize=WRITE_QUEUE_MAX)
         self._ser = None
         self._ser_lock = threading.Lock()
         self._stop = threading.Event()
         self.connected = False
         self.status = "Looking for Arduino..."
+        self.warning = ""
+        self._streaming_wanted = False
+        self._last_led: Optional[str] = None
+        self._last_lcd: Optional[str] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        self._writer = threading.Thread(target=self._write_loop, daemon=True)
+        self._writer.start()
 
     # --- background connection manager ----------------------------------------
     def _run(self) -> None:
@@ -103,6 +115,7 @@ class ArduinoDevice:
             if not self._open():
                 self._stop.wait(RETRY_S)
                 continue
+            self._resync()
             self._read_until_error()
             self._close_port()
             if not self._stop.is_set():
@@ -122,8 +135,12 @@ class ArduinoDevice:
             self.status = f"Cannot open {port}: {exc}"
             return False
         self.port = port
-        if not self._wait_ready(ser):
-            log.warning("No READY from %s within %.0fs - continuing anyway", port, READY_TIMEOUT_S)
+        if self._wait_ready(ser):
+            if self.warning.startswith("No READY"):
+                self.warning = ""
+        else:
+            self.warning = f"No READY from {port} - is the NeuroCheck firmware uploaded?"
+            log.warning(self.warning)
         with self._ser_lock:
             self._ser = ser
         self.connected = True
@@ -141,26 +158,45 @@ class ArduinoDevice:
             if line.startswith("READY"):
                 return True
             if line.startswith("ERROR"):
-                log.error("arduino: %s", line)
+                self._firmware_error(line)
         return False
+
+    def _firmware_error(self, line: str) -> None:
+        self.warning = line[len("ERROR"):].strip() or line
+        log.error("arduino: %s", line)
+
+    def _resync(self) -> None:
+        """Board just (re)booted: restore LED/LCD and streaming state."""
+        for cmd in (self._last_led, self._last_lcd):
+            if cmd:
+                self._enqueue(cmd)
+        if self._streaming_wanted:
+            self._enqueue("START")
 
     def _read_until_error(self) -> None:
         while not self._stop.is_set():
+            ser = self._ser
+            if ser is None:
+                return
             try:
-                raw = self._ser.readline()
+                raw = ser.readline()
             except Exception as exc:
                 log.error("Serial read failed: %s", exc)
                 return
-            if not raw:
-                continue
+            if not raw.endswith(b"\n"):
+                continue        # empty (timeout) or partial line: never half-parse a sample
             sample = parse_line(raw)
             if sample is not None:
+                if "MPU" in self.warning:
+                    self.warning = ""      # sensor is delivering data again
                 if self._samples.qsize() < MAX_BUFFER:
                     self._samples.put(sample)
-            else:
-                text = raw.decode("ascii", errors="ignore").strip()
-                if text:
-                    log.info("arduino: %s", text)
+                continue
+            text = raw.decode("ascii", errors="ignore").strip()
+            if text.startswith("ERROR"):
+                self._firmware_error(text)
+            elif text:
+                log.info("arduino: %s", text)
 
     def _close_port(self) -> None:
         self.connected = False
@@ -172,26 +208,47 @@ class ArduinoDevice:
             except Exception:
                 pass
 
-    def _send(self, cmd: str) -> None:
-        with self._ser_lock:
-            if self._ser is None:
-                log.debug("dropped (not connected): %s", cmd)
-                return
+    def _write_loop(self) -> None:
+        while not self._stop.is_set():
             try:
-                self._ser.write((cmd + "\n").encode("ascii", errors="replace"))
-            except Exception as exc:
-                log.error("Serial write failed (%s): %s", cmd, exc)
+                cmd = self._writes.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            with self._ser_lock:
+                ser = self._ser
+                if ser is None:
+                    log.debug("dropped (not connected): %s", cmd)
+                    continue
                 try:
-                    self._ser.close()   # makes the reader thread notice and reconnect
-                except Exception:
-                    pass
+                    ser.write((cmd + "\n").encode("ascii", errors="replace"))
+                except Exception as exc:
+                    log.error("Serial write failed (%s): %s", cmd, exc)
+                    try:
+                        ser.close()   # makes the reader thread notice and reconnect
+                    except Exception:
+                        pass
+
+    def _enqueue(self, cmd: str) -> None:
+        try:
+            self._writes.put_nowait(cmd)
+        except queue.Full:
+            log.warning("serial write queue full, dropped: %s", cmd)
+
+    def _send(self, cmd: str) -> None:
+        """Non-blocking: the writer thread does the actual (possibly slow) write."""
+        if self._ser is None:
+            log.debug("dropped (not connected): %s", cmd)
+            return
+        self._enqueue(cmd)
 
     # --- shared interface -------------------------------------------------------
     def start(self) -> None:
         self.drain()
+        self._streaming_wanted = True
         self._send("START")
 
     def stop(self) -> None:
+        self._streaming_wanted = False
         self._send("STOP")
 
     def drain(self) -> list[Sample]:
@@ -207,13 +264,18 @@ class ArduinoDevice:
 
     def led(self, colour: str) -> None:
         _check_led(colour)
-        self._send(f"LED,{colour}")
+        self._last_led = f"LED,{colour}"
+        self._send(self._last_led)
 
     def lcd(self, line1: str, line2: str = "") -> None:
-        self._send(lcd_command(line1, line2))
+        self._last_lcd = lcd_command(line1, line2)
+        self._send(self._last_lcd)
 
     def close(self) -> None:
         self.stop()
+        deadline = time.monotonic() + 0.5     # give STOP / LED,OFF a moment to go out
+        while not self._writes.empty() and self._ser is not None and time.monotonic() < deadline:
+            time.sleep(0.02)
         self._stop.set()
         self._close_port()
 
@@ -227,6 +289,7 @@ class MockDevice:
     connected = True
     port = "SIM"
     status = "SIM device"
+    warning = ""
 
     def __init__(self, seed: Optional[int] = None,
                  clock: Callable[[], float] = time.monotonic):

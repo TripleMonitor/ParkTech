@@ -11,7 +11,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-DEFAULT_PATH = "sessions.csv"
+DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions.csv")
 FIELDS = ["timestamp", "seeded",
           "tremor_R", "tremor_L", "tremor_R_cm", "tremor_L_cm", "tremor_R_hz", "tremor_L_hz",
           "tap_R", "tap_L", "tap_R_rate", "tap_L_rate", "tap_R_amp", "tap_L_amp",
@@ -46,7 +46,8 @@ def load_sessions(path: str = DEFAULT_PATH) -> list[dict]:
     if not os.path.exists(path):
         return []
     try:
-        with open(path, newline="", encoding="utf-8") as f:
+        # utf-8-sig: Excel re-saves CSVs with a BOM, which would corrupt the first header
+        with open(path, newline="", encoding="utf-8-sig") as f:
             return list(csv.DictReader(f))
     except (OSError, csv.Error, UnicodeDecodeError) as exc:
         log.error("Could not read %s: %s", path, exc)
@@ -54,8 +55,15 @@ def load_sessions(path: str = DEFAULT_PATH) -> list[dict]:
 
 
 def seed_history(path: str = DEFAULT_PATH, days: int = 7,
-                 now: Optional[datetime] = None) -> list[dict]:
-    """Append `days` daily fake sessions ending yesterday; the RIGHT hand slowly worsens."""
+                 now: Optional[datetime] = None, force: bool = False) -> list[dict]:
+    """Append `days` daily fake sessions ending yesterday; the RIGHT hand slowly worsens.
+
+    Does nothing if seeded sessions already exist (unless force), so running
+    --seed-history repeatedly doesn't stack duplicate weeks.
+    """
+    if not force and any(r.get("seeded") == "1" for r in load_sessions(path)):
+        log.info("%s already has seeded sessions - not adding more", path)
+        return []
     from scoring import score_tapping, score_tremor
     from tapping_analysis import TappingFeatures
     from tremor_analysis import TremorFeatures

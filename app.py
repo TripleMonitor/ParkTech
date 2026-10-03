@@ -27,7 +27,7 @@ from scoring import (ScoreResult, score_tapping, score_tremor, tapping_asymmetry
                      tremor_asymmetry)
 from tapping_analysis import TappingFeatures, analyze_tapping, detect_taps
 from tapping_tracker import HandFrame, draw_distance_graph, draw_hand
-from tremor_analysis import TremorFeatures, analyze_samples
+from tremor_analysis import TremorFeatures, analyze_samples, effective_displacement_cm
 
 log = logging.getLogger("neurocheck")
 
@@ -66,9 +66,10 @@ def led_for(scores: list[Optional[int]]) -> str:
 
 class App:
     def __init__(self, device, hands, seconds: float = 10.0,
-                 history_path: str = history.DEFAULT_PATH):
+                 history_path: str = history.DEFAULT_PATH, clock=time.perf_counter):
         self.device, self.hands, self.seconds = device, hands, seconds
         self.history_path = history_path
+        self.clock = clock          # perf_counter: monotonic() is 15.6 ms on Windows
         self.running = True
         self.restart(0.0)
 
@@ -115,22 +116,25 @@ class App:
 
     def _finish_test(self, now: float) -> None:
         kind, hand = self.test
+        self.device.beep(2)            # done beep first: rendering below can take ~0.2 s
         if kind == "tremor":
             self.device.stop()
             self.samples.extend(self.device.drain())
             self.results[self.test] = self._tremor_result(hand)
         else:
             self.results[self.test] = self._tapping_result(hand)
-        self.device.beep(2)
         score = self.results[self.test].result.score
         self._lcd_test(f"Score {'-' if score is None else score}")
         self._goto("done", now)
 
     def _tremor_result(self, hand: str) -> TestResult:
         f = analyze_samples(self.samples)
-        r = score_tremor(f)
-        if not f.valid and not self.device.connected:
-            r = ScoreResult(None, r.reasons + [self.device.status])
+        r = score_tremor(f, expected_s=self.seconds)
+        if r.score is None:
+            if not self.device.connected:
+                r = ScoreResult(None, r.reasons + [self.device.status])
+            elif getattr(self.device, "warning", ""):
+                r = ScoreResult(None, r.reasons + [self.device.warning])
         img = None
         try:
             img = ui.spectrum_image(f.freqs, f.power, f.peak_hz, f.displacement_cm,
@@ -188,7 +192,7 @@ class App:
             side, f = hand[0], tr.features
             if isinstance(f, TremorFeatures):
                 row.update({f"tremor_{side}": tr.result.score,
-                            f"tremor_{side}_cm": f.displacement_cm if f.valid else None,
+                            f"tremor_{side}_cm": effective_displacement_cm(f) if f.valid else None,
                             f"tremor_{side}_hz": f.peak_hz if f.valid else None})
             elif isinstance(f, TappingFeatures):
                 row.update({f"tap_{side}": tr.result.score,
@@ -221,7 +225,8 @@ class App:
         elif self.state == "done":
             if self.idx + 1 < len(TESTS):
                 self.idx += 1
-                self._begin_countdown(now)
+                self._goto("ready", now)          # time to position the hand / sensor
+                self._lcd_test("SPACE to start")
             else:
                 self._enter_results(now)
         elif self.state == "results":
@@ -249,7 +254,7 @@ class App:
         if kind == "tapping" and active:
             self.hf = self.hands.read(now, hand, detect=True)
             if self.state == "recording":
-                self.tap_t.append(now)
+                self.tap_t.append(self.clock())     # stamp after the (blocking) camera read
                 self.tap_d.append(self.hf.distance)
                 self._update_live_taps(now)
 
@@ -301,6 +306,9 @@ class App:
         if not dev.connected:
             ui.panel(c, 0, 56, ui.W, 30, (40, 40, 150))
             ui.centred(c, f"{dev.status}  -  reconnecting automatically", 78, 0.6, ui.WHITE)
+        elif getattr(dev, "warning", ""):
+            ui.panel(c, 0, 56, ui.W, 30, (0, 110, 160))
+            ui.centred(c, f"Arduino: {dev.warning}", 78, 0.6, ui.WHITE)
 
     def _draw_welcome(self, c, now) -> None:
         ui.centred(c, "1-minute motor check", 200, 1.8, ui.WHITE, 2)
@@ -434,6 +442,28 @@ def build(args):
     return device, hands
 
 
+MIN_TEST_S, MAX_TEST_S = 5.0, 60.0   # decrement needs two 3-s windows; tremor needs >= 2 s
+
+
+def _seconds(value: str) -> float:
+    v = float(value)
+    if not MIN_TEST_S <= v <= MAX_TEST_S:
+        raise argparse.ArgumentTypeError(f"--seconds must be {MIN_TEST_S:g}-{MAX_TEST_S:g}")
+    return v
+
+
+def warm_up_matplotlib() -> None:
+    """First matplotlib import/render takes ~1 s (much longer on a fresh font cache).
+    Pay that before the window opens instead of mid-demo."""
+    t0 = time.perf_counter()
+    try:
+        ui.spectrum_image(np.linspace(0, 50, 64), np.ones(64), 5.0, 0.0, 0, 320, 240)
+        history.trend_image([], 320, 240)
+    except Exception:
+        log.exception("matplotlib warm-up failed (charts may be unavailable)")
+    log.info("charts ready (%.1f s)", time.perf_counter() - t0)
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("--sim", action="store_true", help="MockDevice + FakeHand (no hardware)")
@@ -441,7 +471,8 @@ def parse_args(argv=None):
     p.add_argument("--seed-history", action="store_true", help="add 7 days of fake sessions")
     p.add_argument("--port", help="serial port, e.g. COM5 (default: auto-detect)")
     p.add_argument("--camera", type=int, default=0)
-    p.add_argument("--seconds", type=float, default=10.0, help="recording length per test")
+    p.add_argument("--seconds", type=_seconds, default=10.0,
+                   help="recording length per test, 5-60 (default 10)")
     p.add_argument("--history", default=history.DEFAULT_PATH)
     return p.parse_args(argv)
 
@@ -454,7 +485,7 @@ def run(app: App, hands, device, key_script=None, on_frame=None) -> int:
     key, errors = -1, 0
     try:
         while app.running:
-            now = time.monotonic()
+            now = app.clock()
             if key < 0 and key_script is not None:
                 key = key_script(now)
             try:
@@ -467,7 +498,7 @@ def run(app: App, hands, device, key_script=None, on_frame=None) -> int:
                 ui.centred(canvas, "Something went wrong - press R to restart", 360, 1.0, ui.REC)
                 if key >= 0 and chr(key & 0xFF).lower() == "r":
                     try:
-                        app.restart(time.monotonic())
+                        app.restart(app.clock())
                     except Exception:
                         log.error("Restart failed:\n%s", traceback.format_exc())
             if on_frame is not None:
@@ -494,8 +525,9 @@ def main(argv=None) -> None:
         history.seed_history(args.history)
         log.info("Seeded 7 days of fake sessions into %s", args.history)
     device, hands = build(args)
+    warm_up_matplotlib()
     app = App(device, hands, args.seconds, args.history)
-    app.restart(time.monotonic())
+    app.restart(app.clock())
     run(app, hands, device)
 
 

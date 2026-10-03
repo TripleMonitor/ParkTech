@@ -32,7 +32,7 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
     clock = FakeClock()
     dev = MockDevice(seed=7, clock=clock)
     hands = FakeHand({"Right": IMPAIRED, "Left": NORMAL}, seed=7, test_seconds=seconds)
-    app = App(dev, hands, seconds=seconds, history_path=history_path)
+    app = App(dev, hands, seconds=seconds, history_path=history_path, clock=clock)
     app.restart(clock())
     shots: dict[str, object] = {}
 
@@ -46,11 +46,13 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
             shots[name] = img
 
     snap("01_welcome", tick())
-    tick(KEY_SPACE)                                   # -> ready
+    tick(KEY_SPACE)                                   # welcome -> ready (test 1)
     for i, (kind, hand) in enumerate(TESTS):
+        if app.state != "ready":
+            raise RuntimeError(f"expected ready before test {i + 1}, got {app.state}")
         dev.tremor_on = (kind == "tremor" and hand == "Right")
-        snap(f"02_ready_{i}", tick()) if i == 0 else None
-        tick(KEY_SPACE)                               # ready/done -> countdown
+        snap(f"02_ready_{kind}_{hand}", tick())
+        tick(KEY_SPACE)                               # ready -> countdown
         while app.state != "done":
             img = tick()
             if app.state == "countdown":
@@ -60,7 +62,9 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
             if clock.t > 10_000:
                 raise RuntimeError(f"stuck in state {app.state}")
         snap(f"05_done_{kind}_{hand}", tick())
-    results_img = tick(KEY_SPACE)                     # done -> results
+        if i + 1 < len(TESTS):
+            tick(KEY_SPACE)                           # done -> ready (next test)
+    results_img = tick(KEY_SPACE)                     # last done -> results
     snap("06_results", results_img)
     trend_img = tick(KEY_SPACE)                       # results -> trend
     snap("07_trend", trend_img)

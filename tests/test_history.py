@@ -35,3 +35,18 @@ def test_trend_image_shapes(tmp_path):
     rows = seed_history(str(tmp_path / "s.csv"))
     img = trend_image(rows, 1280, 720)
     assert img.shape == (720, 1280, 3) and img.std() > 10
+
+
+def test_seed_history_is_not_duplicated(tmp_path):
+    path = str(tmp_path / "s.csv")
+    seed_history(path)
+    assert seed_history(path) == []
+    assert len(load_sessions(path)) == 7
+
+
+def test_bom_from_excel_is_handled(tmp_path):
+    path = tmp_path / "s.csv"
+    save_session({"timestamp": "2026-10-01T10:00:00", "tremor_R": 1}, str(path))
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())       # Excel-style BOM
+    rows = load_sessions(str(path))
+    assert rows[0]["timestamp"] == "2026-10-01T10:00:00"

@@ -119,3 +119,29 @@ def test_every_score_has_a_reason():
     assert {r.score for r in results} >= {0, 1, 2, 3, 4}
     for r in results:
         assert r.reasons and all(isinstance(s, str) and s for s in r.reasons)
+
+
+def test_tracking_dropout_scores_zero_with_note():
+    times, dists = taps(rate=3.5)
+    dists = [None if 4.0 <= t < 4.8 else d for t, d in zip(times, dists)]
+    r = score_tapping(analyze_tapping(times, dists))
+    assert r.score == 0 and any("tracking lost" in s for s in r.reasons)
+
+
+def test_partial_tremor_recording_is_unscored():
+    f = analyze_tremor(*signal(accel=19.7, seconds=2.5))
+    r = score_tremor(f, expected_s=10.0)
+    assert r.score is None and "2.5 s of 10 s" in r.reasons[0]
+    assert score_tremor(analyze_tremor(*signal(accel=19.7, seconds=8.5)), 10.0).score == 2
+
+
+def test_score0_reasons_mention_frequency():
+    r = score_tremor(analyze_tremor(*signal(accel=0.0)))
+    assert "Hz" in r.reasons[0]
+
+
+def test_tremor_asymmetry_ignores_unclear_peaks():
+    from tremor_analysis import TremorFeatures
+    r = TremorFeatures(True, 10, 5.0, 1.0, 0.15, False, 2.0, 0.0)   # broadband, no clear peak
+    l = TremorFeatures(True, 10, 5.0, 0.1, 0.02, False, 2.0, 0.0)
+    assert tremor_asymmetry(r, l, score_tremor(r), score_tremor(l)) == []

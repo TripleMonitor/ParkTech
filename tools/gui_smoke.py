@@ -44,9 +44,10 @@ class Script:
         key = -1
         if a.state == "welcome":
             key = KEY_SPACE if self.sessions_done < 2 else ord("q")
-        elif a.state in ("ready", "done"):
-            nxt = a.idx + (1 if a.state == "done" else 0)
-            self.dev.tremor_on = nxt == 0       # right-hand tremor only
+        elif a.state == "ready":
+            self.dev.tremor_on = a.idx == 0     # right-hand tremor only
+            key = KEY_SPACE
+        elif a.state == "done":
             key = KEY_SPACE
         elif a.state == "results":
             key = ord("h") if now - a.t_state > 1.5 else -1
@@ -76,14 +77,14 @@ def main() -> int:
     dev = MockDevice()
     hands = FakeHand()
     app = App(dev, hands, seconds=10.0, history_path=hist)
-    app.restart(time.monotonic())
+    app.restart(app.clock())
     script = Script(app, dev)
     seen: set[str] = set()
 
     def on_frame(a: App, canvas) -> None:
         name = a.state if a.state in ("welcome", "results", "trend") else \
             f"{a.state}_{a.test[0]}_{a.test[1]}"
-        if a.state == "recording" and time.monotonic() - a.t_state < 6:
+        if a.state == "recording" and a.clock() - a.t_state < 6:
             return                               # wait for a well-filled live chart
         if name not in seen:
             seen.add(name)

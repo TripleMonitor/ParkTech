@@ -65,3 +65,32 @@ def test_analyze_samples_from_device_tuples():
     samples = list(zip(t * 1000, ax, ay, az))
     assert analyze_samples(samples).peak_hz == pytest.approx(5.0, abs=0.3)
     assert not analyze_samples([]).valid
+
+
+def test_exact_1cm_is_not_under_read():
+    # scalloping/single-bin errors used to read 0.9965 cm here (-> score 1 instead of 2)
+    f = analyze_tremor(*signal(freq=5.0, accel=displacement_cm_inv(1.0, 5.0)))
+    assert f.displacement_cm >= 1.0 - 0.01
+
+
+def test_off_bin_frequency_amplitude():
+    f = analyze_tremor(*signal(freq=5.37, accel=10.0))
+    assert f.peak_accel == pytest.approx(10.0, rel=0.03)
+
+
+def test_drifting_tremor_amplitude():
+    t = np.arange(0, 10, 0.01)
+    freq = 4.5 + 0.1 * t                       # 4.5 -> 5.5 Hz
+    phase = 2 * np.pi * np.cumsum(freq) * 0.01
+    a = 2.0 / 100 * (2 * np.pi * 5.0) ** 2    # ~2 cm at 5 Hz
+    f = analyze_tremor(t, a * np.sin(phase), np.zeros_like(t), np.full_like(t, G))
+    assert f.displacement_cm == pytest.approx(2.0, rel=0.25)   # single-bin read 1.24
+
+
+def test_band_edge_leakage_is_not_a_clear_peak():
+    f = analyze_tremor(*signal(freq=2.9, accel=5.0))
+    assert not f.clear_peak
+
+
+def displacement_cm_inv(cm, f):
+    return cm / 100 * (2 * np.pi * f) ** 2

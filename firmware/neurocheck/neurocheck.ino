@@ -50,6 +50,10 @@ LiquidCrystal lcdPar(7, 6, 5, 4, 3, 2);    // RS, E, D4, D5, D6, D7
 bool lcdOk = false;
 
 bool mpuOk = false;
+uint8_t mpuFailures = 0;                   // consecutive failed reads
+unsigned long mpuRetryMs = 0;
+const uint8_t MPU_MAX_FAILURES = 10;
+const unsigned long MPU_RETRY_MS = 1000;
 bool streaming = false;
 unsigned long nextSampleUs = 0;
 
@@ -232,15 +236,33 @@ void readSerial() {
 }
 
 // ---------------------------------------------------------------- streaming
+void mpuLost() {
+  mpuOk = false;
+  mpuRetryMs = millis() + MPU_RETRY_MS;
+  Serial.println(F("ERROR MPU6050 stopped responding (check wires)"));
+}
+
 void streamSample() {
   unsigned long nowUs = micros();
   if ((long)(nowUs - nextSampleUs) < 0) return;
   nextSampleUs += SAMPLE_US;
   if ((long)(nowUs - nextSampleUs) > (long)SAMPLE_US) nextSampleUs = nowUs + SAMPLE_US;  // fell behind
+  if (!mpuOk) {                                       // try to bring the sensor back once a second
+    if ((long)(millis() - mpuRetryMs) < 0) return;
+    mpuRetryMs = millis() + MPU_RETRY_MS;
+    mpuOk = mpuInit();
+    mpuFailures = 0;
+    if (!mpuOk) return;
+  }
+  unsigned long tMs = millis();                       // stamp at read time, not print time
   float ax, ay, az;
-  if (!mpuOk || !mpuReadAccel(ax, ay, az)) return;
+  if (!mpuReadAccel(ax, ay, az)) {
+    if (++mpuFailures >= MPU_MAX_FAILURES) mpuLost();
+    return;
+  }
+  mpuFailures = 0;
   Serial.print(F("T,"));
-  Serial.print(millis());
+  Serial.print(tMs);
   Serial.print(',');
   Serial.print(ax, 3);
   Serial.print(',');
@@ -258,10 +280,10 @@ void setup() {
   buzzer(false);
   setLed("OFF");
   Wire.begin();
-  Wire.setClock(400000);
   Wire.setWireTimeout(3000, true);   // a missing/flaky I2C device must not hang the loop
+  lcdInit();                         // LiquidCrystal_I2C::init() calls Wire.begin() again...
+  Wire.setClock(400000);             // ...so set the fast clock after it
   mpuOk = mpuInit();
-  lcdInit();
   lcdShow(mpuOk ? "NeuroCheck|Ready" : "NeuroCheck|MPU6050 ERROR");
   if (!mpuOk) Serial.println(F("ERROR MPU6050 not responding (check SDA A4 / SCL A5 / 5V)"));
   Serial.println(F("READY"));

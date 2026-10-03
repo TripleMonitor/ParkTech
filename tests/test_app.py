@@ -27,21 +27,23 @@ def make_app(tmp_path, device=None, hands=None, seconds=2.0):
     clock = FakeClock()
     device = device or MockDevice(seed=0, clock=clock)
     hands = hands or FakeHand(seed=0, test_seconds=seconds)
-    app = App(device, hands, seconds=seconds, history_path=str(tmp_path / "s.csv"))
+    app = App(device, hands, seconds=seconds, history_path=str(tmp_path / "s.csv"),
+              clock=clock)
     app.restart(clock())
     return app, clock
 
 
 def run_to_results(app, clock):
-    drive(app, clock, KEY_SPACE)
-    for _ in range(4):
-        drive(app, clock, KEY_SPACE)
+    drive(app, clock, KEY_SPACE)                 # welcome -> ready
+    for i in range(4):
+        assert app.state == "ready"
+        drive(app, clock, KEY_SPACE)             # ready -> countdown
         n = 0
         while app.state != "done":
             drive(app, clock)
             n += 1
             assert n < 2000, f"stuck in {app.state}"
-    drive(app, clock, KEY_SPACE)
+        drive(app, clock, KEY_SPACE)             # done -> ready / results
     assert app.state == "results"
 
 
@@ -64,6 +66,41 @@ def test_q_and_esc_quit(tmp_path):
         app, clock = make_app(tmp_path)
         drive(app, clock, key)
         assert app.running is False
+
+
+def test_partial_tremor_data_is_unscored(tmp_path):
+    """Arduino delivers only the first 2.5 s of a 10 s test (e.g. USB glitch)."""
+    clock = FakeClock()
+
+    class Glitchy(MockDevice):
+        def drain(self):
+            out = super().drain()
+            return [s for s in out if s.t_ms - self._start_ms < 2500]
+
+        def start(self):
+            super().start()
+            self._start_ms = self._now_ms()
+
+    dev = Glitchy(clock=clock)
+    dev.tremor_on = True
+    app, clock = make_app(tmp_path, device=dev, seconds=10.0)
+    dev._clock = clock
+    run_to_results(app, clock)
+    r = app.results[("tremor", "Right")].result
+    assert r.score is None and "of 10 s" in r.reasons[0]
+
+
+def test_every_test_has_a_ready_screen(tmp_path):
+    app, clock = make_app(tmp_path)
+    seen = []
+    drive(app, clock, KEY_SPACE)
+    for _ in range(4):
+        seen.append((app.state, app.test))
+        drive(app, clock, KEY_SPACE)
+        while app.state != "done":
+            drive(app, clock)
+        drive(app, clock, KEY_SPACE)
+    assert [s for s, _ in seen] == ["ready"] * 4
 
 
 class DeadDevice(MockDevice):
