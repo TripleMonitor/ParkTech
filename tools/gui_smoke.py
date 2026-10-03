@@ -31,7 +31,7 @@ class Script:
 
     def __init__(self, app: App, dev: MockDevice):
         self.app, self.dev = app, dev
-        self.t0 = time.monotonic()
+        self.t0 = app.clock()
         self.last_press = 0.0
         self.sessions_done = 0
         self.restarted_mid_test = False
@@ -90,9 +90,9 @@ def main() -> int:
             seen.add(name)
             cv2.imwrite(os.path.join(OUT, f"gui_{len(seen):02d}_{name}.png"), canvas)
 
-    t0 = time.monotonic()
+    t0 = app.clock()
     errors = run(app, hands, dev, key_script=script, on_frame=on_frame)
-    elapsed = time.monotonic() - t0
+    elapsed = app.clock() - t0
     print("\n".join(script.log))
     print(f"\nran {elapsed:.1f}s, screens captured: {len(seen)}, caught exceptions: {errors}, "
           f"R mid-test: {script.restarted_mid_test}")

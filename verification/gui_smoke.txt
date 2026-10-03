@@ -1,0 +1,22 @@
+   0.1s  welcome    -> SPACE
+   0.9s  ready      -> SPACE
+  15.0s  done       -> SPACE
+  15.9s  ready      -> SPACE
+  29.1s  done       -> SPACE
+  29.9s  ready      -> SPACE
+  43.0s  done       -> SPACE
+  43.8s  ready      -> SPACE
+  56.9s  done       -> SPACE
+  58.4s  results    -> h
+  59.9s  trend      -> SPACE
+  60.7s  welcome    -> SPACE
+  61.5s  ready      -> SPACE
+  74.7s  done       -> SPACE
+  75.6s  ready      -> SPACE
+  88.8s  done       -> SPACE
+  89.6s  ready      -> SPACE
+  94.6s  recording  -> r
+  95.4s  welcome    -> q
+
+ran 95.7s, screens captured: 19, caught exceptions: 0, R mid-test: True
+GUI SMOKE: PASS

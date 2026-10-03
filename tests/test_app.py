@@ -150,3 +150,15 @@ def test_t_toggles_fake_tremor(tmp_path):
     assert app.device.tremor_on is True
     drive(app, clock, ord("t"))
     assert app.device.tremor_on is False
+
+
+def test_ready_screen_has_no_stale_data_from_previous_test(tmp_path):
+    app, clock = make_app(tmp_path)
+    app.device.tremor_on = True
+    drive(app, clock, KEY_SPACE)
+    drive(app, clock, KEY_SPACE)
+    while app.state != "done":
+        drive(app, clock)
+    assert app.samples                       # right-hand data present on the done screen
+    drive(app, clock, KEY_SPACE)             # -> ready for the left hand
+    assert app.state == "ready" and app.samples == []

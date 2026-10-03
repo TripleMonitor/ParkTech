@@ -1,0 +1,16 @@
+
+CHECK                                 RESULT  DETAIL
+All 4 tests completed                 PASS    4 results
+Right tremor > left tremor            PASS    R 2 vs L 0
+Right tapping > left tapping          PASS    R 2 vs L 0
+Right tremor peak 4-6 Hz              PASS    5.00 Hz
+Every score has a reason              PASS    
+Asymmetry flagged                     PASS    4 flag(s)
+sessions.csv written                  PASS    1 row(s)
+Beeps: 3 countdown + 2 done per test  PASS    20 beeps
+LED colour from results               PASS    LED Y
+LCD shows scores                      PASS    Tremor R2 L0 / Tap R2 L0
+Trend chart rendered                  PASS    (720, 1280, 3)
+Ended on trend screen                 PASS    trend
+
+12/12 passed -> PASS

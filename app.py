@@ -101,6 +101,13 @@ class App:
     def _goto(self, state: str, now: float) -> None:
         self.state, self.t_state = state, now
 
+    def _enter_ready(self, now: float) -> None:
+        """Ready screen for self.test: fresh live views (no data from the previous test)."""
+        self._goto("ready", now)
+        self.samples, self.tap_t, self.tap_d = [], [], []
+        self.hf = HandFrame(None, None, None)
+        self._lcd_test("SPACE to start")
+
     def _begin_countdown(self, now: float) -> None:
         self._goto("countdown", now)
         self.last_beep = 0
@@ -218,15 +225,13 @@ class App:
             return
         elif self.state == "welcome":
             self.idx = 0
-            self._goto("ready", now)
-            self._lcd_test("SPACE to start")
+            self._enter_ready(now)
         elif self.state == "ready":
             self._begin_countdown(now)
         elif self.state == "done":
             if self.idx + 1 < len(TESTS):
                 self.idx += 1
-                self._goto("ready", now)          # time to position the hand / sensor
-                self._lcd_test("SPACE to start")
+                self._enter_ready(now)            # time to position the hand / sensor
             else:
                 self._enter_results(now)
         elif self.state == "results":

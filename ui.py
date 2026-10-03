@@ -141,7 +141,7 @@ def score_card(canvas, x: int, y: int, w: int, h: int, title: str,
     text(canvas, title, (x + 110, y + 36), 0.75, WHITE, 1)
     yy = y + 68
     for reason in reasons:
-        for i, line in enumerate(wrap(reason, w - 130, 0.52)):
+        for i, line in enumerate(wrap(reason, w - 130 - text_width("- ", 0.52), 0.52)):
             if yy > y + h - 10:
                 return
             text(canvas, ("- " if i == 0 else "  ") + line, (x + 110, yy), 0.52, GREY)
