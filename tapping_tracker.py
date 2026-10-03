@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import math
 import random
+import time
+from collections import deque
 from dataclasses import dataclass
 from typing import NamedTuple, Optional, Sequence
 
@@ -31,6 +33,7 @@ class HandFrame(NamedTuple):
     frame: Optional[np.ndarray]        # BGR image to show (None = no camera)
     landmarks: Optional[np.ndarray]    # (21, 2) pixels, None = no hand found
     label: Optional[str]               # "Left"/"Right" as seen by MediaPipe
+    score: Optional[float] = None      # MediaPipe hand confidence (0..1)
 
     @property
     def distance(self) -> Optional[float]:
@@ -38,19 +41,56 @@ class HandFrame(NamedTuple):
 
 
 # --- real camera ---------------------------------------------------------------------
+class Telemetry:
+    """Rolling camera/inference stats - all measured, nothing estimated."""
+
+    def __init__(self) -> None:
+        self.frame_times: deque = deque(maxlen=60)
+        self.infer_ms: deque = deque(maxlen=30)
+        self.failed_reads = 0
+
+    def frame(self, t: float) -> None:
+        self.frame_times.append(t)
+
+    @property
+    def fps(self) -> Optional[float]:
+        ts = list(self.frame_times)
+        if len(ts) < 2 or ts[-1] - ts[0] <= 0 or time.perf_counter() - ts[-1] > 1.0:
+            return None
+        return (len(ts) - 1) / (ts[-1] - ts[0])
+
+    @property
+    def inference_ms(self) -> Optional[float]:
+        return float(np.mean(self.infer_ms)) if self.infer_ms else None
+
+
 class CameraHand:
+    sim = False
+
     def __init__(self, index: int = 0):
+        self.telemetry = Telemetry()
+        t0 = time.perf_counter()
         self._cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         if not self._cap.isOpened():
             self._cap = cv2.VideoCapture(index)
         self.ok = self._cap.isOpened()
+        self.open_ms = (time.perf_counter() - t0) * 1000
         self.status = "Camera OK" if self.ok else f"Camera {index} unavailable"
         self._hands = None
+        self.model_ms: Optional[float] = None
+        self.model_error = ""
         if self.ok:
-            import mediapipe as mp
-            self._hands = mp.solutions.hands.Hands(
-                static_image_mode=False, max_num_hands=1, model_complexity=0,
-                min_detection_confidence=0.6, min_tracking_confidence=0.5)
+            t1 = time.perf_counter()
+            try:
+                import mediapipe as mp
+                self._hands = mp.solutions.hands.Hands(
+                    static_image_mode=False, max_num_hands=1, model_complexity=0,
+                    min_detection_confidence=0.6, min_tracking_confidence=0.5)
+                self.model_ms = (time.perf_counter() - t1) * 1000
+            except Exception as exc:          # model missing/corrupt: camera tests unavailable
+                self.model_error = str(exc)
+                self.ok = False
+                self.status = f"MediaPipe failed: {exc}"
 
     def reset(self, now: float) -> None:
         pass
@@ -61,18 +101,33 @@ class CameraHand:
         ok, raw = self._cap.read()
         if not ok or raw is None:
             self.status = "Camera read failed"
+            self.telemetry.failed_reads += 1
             return HandFrame(None, None, None)
         self.status = "Camera OK"
+        self.telemetry.frame(time.perf_counter())
         frame = cv2.flip(raw, 1)
         if not detect:
             return HandFrame(frame, None, None)
+        t0 = time.perf_counter()
         res = self._hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        self.telemetry.infer_ms.append((time.perf_counter() - t0) * 1000)
         if not res.multi_hand_landmarks:
             return HandFrame(frame, None, None)
         h, w = frame.shape[:2]
         pts = np.array([[p.x * w, p.y * h] for p in res.multi_hand_landmarks[0].landmark])
-        label = res.multi_handedness[0].classification[0].label
-        return HandFrame(frame, pts, label)
+        cls = res.multi_handedness[0].classification[0]
+        return HandFrame(frame, pts, cls.label, float(cls.score))
+
+    def measure_fps(self, n: int = 20) -> Optional[float]:
+        """Boot check: time n raw frame reads (no inference)."""
+        if not self.ok:
+            return None
+        t0, got = time.perf_counter(), 0
+        for _ in range(n):
+            ok, _ = self._cap.read()
+            got += bool(ok)
+        dt = time.perf_counter() - t0
+        return got / dt if got and dt > 0 else None
 
     def close(self) -> None:
         if self._hands is not None:
@@ -126,6 +181,13 @@ class FakeHand:
 
     status = "Simulated hand"
     ok = True
+    sim = True
+    open_ms = 0.0
+    model_ms = None
+    model_error = ""
+
+    def measure_fps(self, n: int = 20) -> Optional[float]:
+        return None
 
     def __init__(self, profiles: Optional[dict] = None, seed: Optional[int] = None,
                  test_seconds: float = 10.0, tremor_cm: Optional[dict] = None,
@@ -134,6 +196,7 @@ class FakeHand:
         self.tremor_cm = dict(tremor_cm if tremor_cm is not None else {"Right": 1.5, "Left": 0.0})
         self.tremor_hz = tremor_hz
         self.tremor_enabled = True
+        self.telemetry = Telemetry()
         self._rng = random.Random(seed)
         self._seconds = test_seconds
         self._t0 = 0.0
@@ -169,13 +232,15 @@ class FakeHand:
         return _PALM + shift + jitter
 
     def read(self, now: float, hand: str, detect: bool, test: str = "tapping") -> HandFrame:
-        frame = np.full((480, 640, 3), (60, 50, 45), np.uint8)
-        cv2.putText(frame, "SIMULATED HAND (--sim)", (20, 460), FONT, 0.6, GREY, 1, cv2.LINE_AA)
+        self.telemetry.frame(time.perf_counter())
+        frame = np.full((480, 640, 3), (40, 34, 30), np.uint8)
+        cv2.putText(frame, "SIM HAND - synthetic landmarks", (290, 465), FONT, 0.55, GREY, 1,
+                    cv2.LINE_AA)
         if not detect:
             return HandFrame(frame, None, None)
         if test == "tremor":
-            return HandFrame(frame, self.palm_at(now, hand), hand)
-        return HandFrame(frame, self.landmarks_for(self.distance_at(now, hand)), hand)
+            return HandFrame(frame, self.palm_at(now, hand), hand, 1.0)
+        return HandFrame(frame, self.landmarks_for(self.distance_at(now, hand)), hand, 1.0)
 
     def close(self) -> None:
         pass
@@ -190,13 +255,15 @@ def draw_hand(frame: np.ndarray, hf: HandFrame, expected_hand: str, test: str = 
     if hf.landmarks is None:
         cv2.putText(frame, "Show your hand to the camera", (20, 40), FONT, 0.9, RED, 2, cv2.LINE_AA)
         return
+    pts = hf.landmarks.astype(int)
+    tracked = (WRIST, INDEX_TIP, MIDDLE_MCP) if test == "tremor" else \
+        (WRIST, THUMB_TIP, INDEX_TIP, MIDDLE_MCP)
+    _glow(frame, pts, tracked)
+    for i in tracked:
+        cv2.putText(frame, str(i), (int(pts[i][0]) + 10, int(pts[i][1]) - 10), FONT, 0.5,
+                    YELLOW, 1, cv2.LINE_AA)
     if test == "tremor":
-        pts = hf.landmarks.astype(int)
-        for a, b in HAND_CONNECTIONS:
-            cv2.line(frame, tuple(pts[a]), tuple(pts[b]), WHITE, 2, cv2.LINE_AA)
-        for p in pts:
-            cv2.circle(frame, tuple(p), 4, ACCENT, -1, cv2.LINE_AA)
-        cv2.circle(frame, tuple(pts[INDEX_TIP]), 12, YELLOW, 2, cv2.LINE_AA)
+        cv2.circle(frame, tuple(pts[INDEX_TIP]), 14, YELLOW, 2, cv2.LINE_AA)
         cv2.line(frame, tuple(pts[WRIST]), tuple(pts[MIDDLE_MCP]), GREEN, 2, cv2.LINE_AA)
         cv2.putText(frame, "9 cm", tuple(((pts[WRIST] + pts[MIDDLE_MCP]) // 2) + (8, 0)), FONT,
                     0.55, GREEN, 1, cv2.LINE_AA)
@@ -204,13 +271,7 @@ def draw_hand(frame: np.ndarray, hf: HandFrame, expected_hand: str, test: str = 
             cv2.putText(frame, f"That looks like your {hf.label.upper()} hand", (20, 40), FONT,
                         0.8, YELLOW, 2, cv2.LINE_AA)
         return
-    pts = hf.landmarks.astype(int)
-    for a, b in HAND_CONNECTIONS:
-        cv2.line(frame, tuple(pts[a]), tuple(pts[b]), WHITE, 2, cv2.LINE_AA)
-    for i, p in enumerate(pts):
-        cv2.circle(frame, tuple(p), 7 if i in (THUMB_TIP, INDEX_TIP) else 4,
-                   YELLOW if i in (THUMB_TIP, INDEX_TIP) else ACCENT, -1, cv2.LINE_AA)
-    cv2.line(frame, tuple(pts[THUMB_TIP]), tuple(pts[INDEX_TIP]), GREEN, 4, cv2.LINE_AA)
+    cv2.line(frame, tuple(pts[THUMB_TIP]), tuple(pts[INDEX_TIP]), GREEN, 3, cv2.LINE_AA)
     cv2.line(frame, tuple(pts[WRIST]), tuple(pts[MIDDLE_MCP]), GREY, 1, cv2.LINE_AA)
     d = hf.distance
     if d is not None:
@@ -220,6 +281,20 @@ def draw_hand(frame: np.ndarray, hf: HandFrame, expected_hand: str, test: str = 
     if hf.label and hf.label.lower() != expected_hand.lower():
         cv2.putText(frame, f"That looks like your {hf.label.upper()} hand", (20, 40), FONT, 0.8,
                     YELLOW, 2, cv2.LINE_AA)
+
+
+def _glow(frame: np.ndarray, pts: np.ndarray, tracked: Sequence[int]) -> None:
+    """Skeleton with glowing landmarks; tracked points larger and brighter."""
+    glow = frame.copy()
+    for i, p in enumerate(pts):
+        cv2.circle(glow, tuple(p), 16 if i in tracked else 9, YELLOW if i in tracked else ACCENT,
+                   -1, cv2.LINE_AA)
+    cv2.addWeighted(glow, 0.35, frame, 0.65, 0, dst=frame)
+    for a, b in HAND_CONNECTIONS:
+        cv2.line(frame, tuple(pts[a]), tuple(pts[b]), (200, 200, 200), 1, cv2.LINE_AA)
+    for i, p in enumerate(pts):
+        cv2.circle(frame, tuple(p), 6 if i in tracked else 3,
+                   (255, 255, 255) if i in tracked else ACCENT, -1, cv2.LINE_AA)
 
 
 def draw_distance_graph(canvas: np.ndarray, times: Sequence[float],

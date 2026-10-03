@@ -14,6 +14,7 @@ import tempfile
 import cv2
 
 from app import KEY_SPACE, TESTS, App, led_for
+from boot import BootChecks
 from device import IMPAIRED_FLIPS, NORMAL_FLIPS, MockDevice
 from history import load_sessions, trend_image
 from tapping_tracker import IMPAIRED, NORMAL, FakeHand
@@ -35,8 +36,9 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
                      profiles={"Right": IMPAIRED_FLIPS, "Left": NORMAL_FLIPS})
     hands = FakeHand({"Right": IMPAIRED, "Left": NORMAL}, seed=7, test_seconds=seconds,
                      tremor_cm={"Right": 1.5, "Left": 0.0})
-    app = App(dev, hands, seconds=seconds, history_path=history_path, clock=clock)
-    app.restart(clock())
+    boot = BootChecks(dev, hands, pace_s=0)
+    boot.run()                                        # synchronous in the self-test
+    app = App(dev, hands, seconds=seconds, history_path=history_path, clock=clock, boot=boot)
     shots: dict[str, object] = {}
 
     def tick(key: int = -1):
@@ -48,6 +50,8 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
         if name not in shots:
             shots[name] = img
 
+    snap("00_boot", tick())
+    tick(KEY_SPACE)                                   # boot -> welcome
     snap("01_welcome", tick())
     tick(KEY_SPACE)                                   # welcome -> ready (test 1)
     for i, (kind, hand) in enumerate(TESTS):
@@ -87,7 +91,12 @@ def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[st
     rp, lp = score("tapping", "Right"), score("tapping", "Left")
     rf, lf = score("flipping", "Right"), score("flipping", "Left")
     rows = load_sessions(history_path)
+    boot = app.boot
     out = [
+        ("Boot self-check: 9 lines, sim lines say SIM",
+         boot is not None and boot.done and len(boot.lines) == 9 and boot.failures == 0
+         and all(l.status == "SIM" for l in boot.lines),
+         "" if boot is None else ", ".join(l.status for l in boot.lines)),
         ("All 6 tests completed", len(res) == 6, f"{len(res)} results"),
         ("Right tremor > left tremor", rt is not None and lt is not None and rt > lt,
          f"R {rt} vs L {lt}"),
@@ -105,7 +114,12 @@ def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[st
          all(any(f.startswith(t) for f in app.flags) for t in ("Tremor", "Tapping", "Flipping")),
          f"{len(app.flags)} flag(s)"),
         ("sessions.csv written", len(rows) == 1 and rows[0]["tremor_R"] == str(rt)
-         and rows[0]["flip_R"] == str(rf), f"{len(rows)} row(s)"),
+         and rows[0]["flip_R"] == str(rf) and rows[0]["session_id"] == app.session_id,
+         f"{len(rows)} row(s)"),
+        ("Signal quality measured on camera tests",
+         all(res[(k, h)].quality is not None and res[(k, h)].quality.frames > 250
+             for k in ("tremor", "tapping") for h in ("Right", "Left")),
+         f"{res[('tremor', 'Right')].quality.frames} frames"),
         ("Beeps: 3 countdown + 2 done per test", dev.beeps == 6 * (3 + 2), f"{dev.beeps} beeps"),
         ("LED colour from results", dev.last_led == led_for([rt, lt, rp, lp, rf, lf]),
          f"LED {dev.last_led}"),

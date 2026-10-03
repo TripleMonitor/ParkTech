@@ -1,36 +1,91 @@
-"""Drawing helpers for the single OpenCV window: palette, text, cards, charts."""
+"""HUD drawing helpers for the single OpenCV window: palette, mono text, panels, charts.
+
+Text is rendered with DejaVu Sans Mono (bundled with matplotlib) through a cached PIL
+renderer, so every number is monospace and layouts don't jitter as values change.
+"""
 from __future__ import annotations
 
+import functools
+import os
 from typing import Optional, Sequence
 
 import cv2
 import numpy as np
 
 W, H = 1280, 720
-FONT = cv2.FONT_HERSHEY_DUPLEX
+FONT = cv2.FONT_HERSHEY_DUPLEX          # fallback only
 
-# BGR palette
-BG = (32, 27, 24)
-PANEL = (56, 49, 44)
-PANEL_HI = (72, 63, 57)
-WHITE = (245, 245, 245)
-GREY = (165, 160, 155)
-DIM = (120, 115, 110)
-ACCENT = (255, 190, 60)        # blue-ish cyan
+# BGR palette: near-black, one accent (cyan), green/amber/red for status only
+BG = (14, 12, 10)
+PANEL = (30, 26, 22)
+PANEL_HI = (48, 42, 36)
+BORDER = (78, 70, 60)
+WHITE = (236, 236, 232)
+GREY = (160, 156, 150)
+DIM = (110, 106, 100)
+ACCENT = (230, 205, 40)        # cyan
 REC = (70, 70, 235)            # red
-OK = (100, 205, 100)
-WARN = (0, 200, 255)
-AXIS_COLOURS = ((80, 80, 240), (90, 210, 90), (240, 160, 60))   # x red, y green, z blue
-SCORE_COLOURS = {0: (100, 205, 100), 1: (60, 215, 190), 2: (0, 200, 255),
-                 3: (0, 140, 255), 4: (70, 70, 235), None: (130, 125, 120)}
+OK = (110, 210, 90)            # green
+WARN = (40, 180, 255)          # amber
+AXIS_COLOURS = ((80, 80, 240), (110, 210, 90), (230, 205, 40))
+SCORE_COLOURS = {0: OK, 1: OK, 2: WARN, 3: REC, 4: REC, None: DIM}   # same as the LED
+BRACKET = 12
+PX_PER_SCALE = 30              # text "scale" 1.0 ~ 30 px font
+
+
+@functools.lru_cache(maxsize=8)
+def _font(size: int, bold: bool):
+    try:
+        from PIL import ImageFont
+        import matplotlib
+        name = "DejaVuSansMono-Bold.ttf" if bold else "DejaVuSansMono.ttf"
+        path = os.path.join(matplotlib.get_data_path(), "fonts", "ttf", name)
+        return ImageFont.truetype(path, size)
+    except Exception:
+        return None
+
+
+@functools.lru_cache(maxsize=4096)
+def _render(s: str, size: int, bold: bool):
+    """(alpha mask uint8, ascent) for a string, or None if no TrueType font."""
+    font = _font(size, bold)
+    if font is None:
+        return None
+    from PIL import Image, ImageDraw
+    ascent, descent = font.getmetrics()
+    w = max(1, int(np.ceil(font.getlength(s))))
+    img = Image.new("L", (w, ascent + descent), 0)
+    ImageDraw.Draw(img).text((0, 0), s, font=font, fill=255)
+    return np.asarray(img), ascent
+
+
+def _size(scale: float) -> int:
+    return max(8, int(round(scale * PX_PER_SCALE)))
 
 
 def text(img, s: str, org, scale: float = 0.7, colour=WHITE, thick: int = 1) -> None:
-    cv2.putText(img, s, (int(org[0]), int(org[1])), FONT, scale, colour, thick, cv2.LINE_AA)
+    """Draw text with its baseline at org (like cv2.putText). thick>=2 -> bold."""
+    r = _render(str(s), _size(scale), thick >= 2)
+    if r is None:
+        cv2.putText(img, s, (int(org[0]), int(org[1])), FONT, scale, colour, thick, cv2.LINE_AA)
+        return
+    mask, ascent = r
+    x0, y0 = int(org[0]), int(org[1]) - ascent
+    h, w = mask.shape
+    xa, ya = max(x0, 0), max(y0, 0)
+    xb, yb = min(x0 + w, img.shape[1]), min(y0 + h, img.shape[0])
+    if xa >= xb or ya >= yb:
+        return
+    a = mask[ya - y0:yb - y0, xa - x0:xb - x0, None].astype(np.float32) / 255.0
+    roi = img[ya:yb, xa:xb].astype(np.float32)
+    img[ya:yb, xa:xb] = (roi * (1 - a) + np.array(colour, np.float32) * a).astype(np.uint8)
 
 
 def text_width(s: str, scale: float, thick: int = 1) -> int:
-    return cv2.getTextSize(s, FONT, scale, thick)[0][0]
+    font = _font(_size(scale), thick >= 2)
+    if font is None:
+        return cv2.getTextSize(s, FONT, scale, thick)[0][0]
+    return int(np.ceil(font.getlength(str(s))))
 
 
 def centred(img, s: str, y: int, scale: float = 1.0, colour=WHITE, thick: int = 1,
@@ -58,12 +113,45 @@ def paste(canvas, img, x: int, y: int, w: int, h: int) -> None:
     canvas[y:y + h, x:x + w] = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
 
 
-def panel(canvas, x: int, y: int, w: int, h: int, colour=PANEL) -> None:
+def panel(canvas, x: int, y: int, w: int, h: int, colour=PANEL, brackets: bool = True,
+          accent=ACCENT) -> None:
+    """Filled panel with a thin border and HUD corner brackets."""
     cv2.rectangle(canvas, (x, y), (x + w, y + h), colour, -1)
+    if not brackets:
+        return
+    cv2.rectangle(canvas, (x, y), (x + w, y + h), BORDER, 1)
+    b = min(BRACKET, w // 4, h // 4)
+    for cx, cy, dx, dy in ((x, y, 1, 1), (x + w, y, -1, 1), (x, y + h, 1, -1), (x + w, y + h, -1, -1)):
+        cv2.line(canvas, (cx, cy), (cx + dx * b, cy), accent, 2)
+        cv2.line(canvas, (cx, cy), (cx, cy + dy * b), accent, 2)
+
+
+def bar(canvas, x: int, y: int, w: int, h: int, frac: float, colour) -> None:
+    cv2.rectangle(canvas, (x, y), (x + w, y + h), PANEL_HI, -1)
+    cv2.rectangle(canvas, (x, y), (x + int(w * max(0.0, min(1.0, frac))), y + h), colour, -1)
+
+
+def badge(canvas, s: str, x: int, y: int, colour, scale: float = 0.45) -> int:
+    """Outlined label box with top-left at (x, y). Returns its width."""
+    w = text_width(s, scale, 2) + 14
+    h = _size(scale) + 8
+    cv2.rectangle(canvas, (x, y), (x + w, y + h), colour, 1)
+    text(canvas, s, (x + 7, y + h - 6), scale, colour, 2)
+    return w
+
+
+@functools.lru_cache(maxsize=1)
+def _background() -> np.ndarray:
+    img = np.full((H, W, 3), BG, np.uint8)
+    for x in range(0, W, 40):                      # faint HUD grid
+        img[:, x] = (20, 18, 15)
+    for y in range(0, H, 40):
+        img[y, :] = (20, 18, 15)
+    return img
 
 
 def blank() -> np.ndarray:
-    return np.full((H, W, 3), BG, np.uint8)
+    return _background().copy()
 
 
 def fingertip_chart(canvas, times: Sequence[float], xy_cm: Sequence, now: float,
@@ -165,13 +253,42 @@ def spectrum_image(freqs: np.ndarray, power: np.ndarray, peak_hz: float, disp_cm
     return cv2.resize(img, (width, height)) if img.shape[:2] != (height, width) else img
 
 
+def tilt_plot(canvas, events: Sequence, calib: Optional[int], now: float,
+              x: int, y: int, w: int, h: int, seconds: float = 5.0) -> None:
+    """Scrolling step plot of the tilt-switch state (raw reports, before Python debounce)."""
+    panel(canvas, x, y, w, h)
+    text(canvas, "tilt switch state (last 5 s)", (x + 10, y + 20), 0.45, GREY)
+    hi, lo = y + 34, y + h - 14
+    pts = [(e.t, e.state) for e in events if now - e.t <= seconds]
+    if not pts:
+        return
+    path = []
+    prev = None
+    for t, st in pts:
+        px = x + int(w * (1 - (now - t) / seconds))
+        py = hi if (calib is not None and st != calib) or (calib is None and st) else lo
+        if prev is not None:
+            path.append((px, prev))
+        path.append((px, py))
+        prev = py
+    path.append((x + w, prev))
+    cv2.polylines(canvas, [np.array(path, np.int32)], False, ACCENT, 2, cv2.LINE_AA)
+    text(canvas, "UP", (x + w - 34, hi + 5), 0.4, DIM)
+    text(canvas, "DOWN", (x + w - 50, lo + 5), 0.4, DIM)
+
+
 def score_card(canvas, x: int, y: int, w: int, h: int, title: str,
-               score: Optional[int], reasons: Sequence[str], compact: bool = False) -> None:
-    """Score + title + every reason (wrapped). compact=True for the 6-card results grid."""
+               score: Optional[int], reasons: Sequence[str], compact: bool = False,
+               flag: str = "") -> None:
+    """Score + title + every reason (wrapped). compact=True for the 6-card results grid.
+    flag (e.g. "LOW CONFIDENCE") is drawn as an amber badge in the top-right corner."""
     col = SCORE_COLOURS.get(score, SCORE_COLOURS[None])
     big, title_s, rs, lh, left = (1.9, 0.62, 0.46, 19, 78) if compact else (2.6, 0.75, 0.52, 24, 110)
     panel(canvas, x, y, w, h)
     cv2.rectangle(canvas, (x, y), (x + 8, y + h), col, -1)
+    if flag:
+        fw = text_width(flag, 0.4, 2) + 14
+        badge(canvas, flag, x + w - fw - 8, y + 8, WARN, 0.4)
     text(canvas, "-" if score is None else str(score), (x + 22, y + (62 if compact else 88)),
          big, col, 4 if not compact else 3)
     text(canvas, title, (x + left, y + (26 if compact else 36)), title_s, WHITE, 1)
@@ -182,3 +299,10 @@ def score_card(canvas, x: int, y: int, w: int, h: int, title: str,
                 return
             text(canvas, ("- " if i == 0 else "  ") + line, (x + left, yy), rs, GREY)
             yy += lh
+
+
+def brackets(canvas, x: int, y: int, w: int, h: int, colour=ACCENT, length: int = 18) -> None:
+    """HUD corner brackets only (e.g. around the camera view)."""
+    for cx, cy, dx, dy in ((x, y, 1, 1), (x + w, y, -1, 1), (x, y + h, 1, -1), (x + w, y + h, -1, -1)):
+        cv2.line(canvas, (cx, cy), (cx + dx * length, cy), colour, 2)
+        cv2.line(canvas, (cx, cy), (cx, cy + dy * length), colour, 2)

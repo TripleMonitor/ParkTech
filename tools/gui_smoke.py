@@ -18,6 +18,7 @@ import cv2
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import KEY_SPACE, App, run  # noqa: E402
+from boot import BootChecks  # noqa: E402
 from device import MockDevice  # noqa: E402
 from history import seed_history  # noqa: E402
 from tapping_tracker import FakeHand  # noqa: E402
@@ -42,7 +43,9 @@ class Script:
         if now - self.last_press < 0.8:          # let each screen show for a moment
             return -1
         key = -1
-        if a.state == "welcome":
+        if a.state == "boot":
+            key = KEY_SPACE if a.boot.done and now - self.t0 > 1.0 else -1
+        elif a.state == "welcome":
             key = KEY_SPACE if self.sessions_done < 2 else ord("q")
         elif a.state == "ready":
             key = KEY_SPACE
@@ -75,16 +78,18 @@ def main() -> int:
     seed_history(hist)
     dev = MockDevice()
     hands = FakeHand()
-    app = App(dev, hands, seconds=10.0, history_path=hist)
-    app.restart(app.clock())
+    app = App(dev, hands, seconds=10.0, history_path=hist,
+              boot=BootChecks(dev, hands).start())
     script = Script(app, dev)
     seen: set[str] = set()
 
     def on_frame(a: App, canvas) -> None:
-        name = a.state if a.state in ("welcome", "results", "trend") else \
+        name = a.state if a.state in ("boot", "welcome", "results", "trend") else \
             f"{a.state}_{a.test[0]}_{a.test[1]}"
         if a.state == "recording" and a.clock() - a.t_state < 6:
             return                               # wait for a well-filled live chart
+        if a.state == "boot" and not a.boot.done:
+            return
         if name not in seen:
             seen.add(name)
             cv2.imwrite(os.path.join(OUT, f"gui_{len(seen):02d}_{name}.png"), canvas)

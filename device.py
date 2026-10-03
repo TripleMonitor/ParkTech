@@ -17,6 +17,7 @@ import queue
 import random
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, NamedTuple, Optional
 
@@ -136,6 +137,10 @@ class ArduinoDevice:
         self.status = "Looking for Arduino..."
         self.warning = ""
         self.state: Optional[int] = None
+        self.sim = False
+        self.ready_received = False
+        self._rx_times: deque = deque(maxlen=2000)
+        self._ping = threading.Event()
         self._streaming_wanted = False
         self._last_led: Optional[str] = None
         self._last_lcd: Optional[str] = None
@@ -171,7 +176,8 @@ class ArduinoDevice:
             return False
         self.port = port
         self._mapper.reset()          # the Uno resets on open: millis restart from 0
-        if self._wait_ready(ser):
+        self.ready_received = self._wait_ready(ser)
+        if self.ready_received:
             if self.warning.startswith("No READY"):
                 self.warning = ""
         else:
@@ -223,9 +229,11 @@ class ArduinoDevice:
             received = self._clock()
             if not raw.endswith(b"\n"):
                 continue        # empty (timeout) or partial line: never half-parse
+            self._rx_times.append(received)
             rep = parse_line(raw)
             if rep is not None:
                 self.state = rep.state
+                self._ping.set()
                 self._mapper.observe(rep.t_ms, received)
                 if self._events.qsize() < MAX_BUFFER:
                     self._events.put(rep)
@@ -278,6 +286,24 @@ class ArduinoDevice:
             log.debug("dropped (not connected): %s", cmd)
             return
         self._enqueue(cmd)
+
+    # --- telemetry ------------------------------------------------------------------
+    @property
+    def packets_per_sec(self) -> float:
+        """Serial lines received in the last second (real)."""
+        now = self._clock()
+        return float(sum(1 for t in list(self._rx_times) if now - t <= 1.0))
+
+    def measure_latency(self, timeout: float = 1.0) -> Optional[float]:
+        """Round trip in ms: send STATE, wait for the S reply. Blocking - call off the UI thread."""
+        if self._ser is None:
+            return None
+        self._ping.clear()
+        t0 = time.perf_counter()
+        self._send("STATE")
+        if not self._ping.wait(timeout):
+            return None
+        return (time.perf_counter() - t0) * 1000.0
 
     # --- shared interface -------------------------------------------------------
     def start(self) -> None:
@@ -345,6 +371,8 @@ class MockDevice:
     port = "SIM"
     status = "SIM device"
     warning = ""
+    sim = True
+    ready_received = True
 
     def __init__(self, seed: Optional[int] = None, clock: Callable[[], float] = time.perf_counter,
                  profiles: Optional[dict] = None, test_seconds: float = 10.0):
@@ -362,6 +390,15 @@ class MockDevice:
         self.beeps = 0
         self.last_lcd = ("", "")
         self.last_led = "OFF"
+        self._rx_times: deque = deque(maxlen=2000)
+
+    @property
+    def packets_per_sec(self) -> float:
+        now = self._clock()
+        return float(sum(1 for t in list(self._rx_times) if now - t <= 1.0))
+
+    def measure_latency(self, timeout: float = 1.0) -> Optional[float]:
+        return None          # nothing to measure in simulation
 
     def _rate(self, t: float) -> float:
         p = self.profiles.get(self.sim_hand, NORMAL_FLIPS)
@@ -409,6 +446,7 @@ class MockDevice:
     def drain(self) -> list[SwitchEvent]:
         self._generate(self._clock())
         out, self._pending = self._pending, []
+        self._rx_times.extend(e.t for e in out)
         return out
 
     def beep(self, n: int = 1) -> None:
