@@ -1,66 +1,115 @@
-"""Headless smoke test: drive the whole session flow with simulated time."""
-from app import App, KEY_SPACE, TESTS
-from device import MockDevice, Sample
-from history import load_sessions
+"""App state machine tests, headless, on a fake clock."""
+import pytest
+
+from app import KEY_SPACE, App, led_for
+from device import MockDevice
+from selftest import FakeClock, checks, run_session
+from tapping_tracker import FakeHand, HandFrame
 
 
-class FakeClockDevice(MockDevice):
-    """MockDevice whose samples follow the test's fake clock."""
-
-    def __init__(self):
-        super().__init__(seed=0)
-        self.now_ms = 0.0
-        self.beeps = 0
-
-    def _now_ms(self):
-        return self.now_ms
-
-    def beep(self, n=1):
-        self.beeps += n
-
-
-def run_session(tmp_path, tremor_on):
-    dev = FakeClockDevice()
-    dev.tremor_on = tremor_on
+def test_full_selftest_session_passes(tmp_path):
     path = str(tmp_path / "s.csv")
-    app = App(dev, tracker=None, seconds=2.0, history_path=path, sim=True)
-    now = 0.0
-
-    def tick(key=-1):
-        dev.now_ms = now * 1000
-        return app.tick(key, now, None)
-
-    tick(KEY_SPACE)                      # welcome -> ready
-    for _ in TESTS:
-        assert app.state == "ready"
-        tick(KEY_SPACE)                  # -> countdown
-        while app.state != "ready" and app.state != "results":
-            now += 1 / 30
-            img = tick()
-            assert img.shape == (720, 1280, 3)
-    return app, dev, path
+    app, dev, _, trend = run_session(path, seconds=10.0)
+    failed = [(name, detail) for name, ok, detail in checks(app, dev, path, trend) if not ok]
+    assert failed == []
 
 
-def test_full_session_with_tremor(tmp_path):
-    app, dev, path = run_session(tmp_path, tremor_on=True)
+def drive(app, clock, key=-1, frames=1):
+    img = None
+    for _ in range(frames):
+        img = app.tick(key, clock())
+        key = -1
+        clock.t += 1 / 30
+    return img
+
+
+def make_app(tmp_path, device=None, hands=None, seconds=2.0):
+    clock = FakeClock()
+    device = device or MockDevice(seed=0, clock=clock)
+    hands = hands or FakeHand(seed=0, test_seconds=seconds)
+    app = App(device, hands, seconds=seconds, history_path=str(tmp_path / "s.csv"))
+    app.restart(clock())
+    return app, clock
+
+
+def run_to_results(app, clock):
+    drive(app, clock, KEY_SPACE)
+    for _ in range(4):
+        drive(app, clock, KEY_SPACE)
+        n = 0
+        while app.state != "done":
+            drive(app, clock)
+            n += 1
+            assert n < 2000, f"stuck in {app.state}"
+    drive(app, clock, KEY_SPACE)
     assert app.state == "results"
-    assert app.results[("tremor", "Right")].result.score == 2
-    assert app.results[("tapping", "Right")].result.score is None   # no camera
-    assert dev.beeps == 4 * (3 + 1)                                 # 3-2-1 + done
-    assert dev.last_led == "R"
-    rows = load_sessions(path)
-    assert len(rows) == 1 and rows[0]["tremor_R"] == "2"
 
 
-def test_full_session_without_tremor(tmp_path):
-    app, dev, _ = run_session(tmp_path, tremor_on=False)
-    assert app.results[("tremor", "Left")].result.score == 0
-    assert dev.last_led == "G"
+@pytest.mark.parametrize("target", ["ready", "countdown", "recording", "done", "results", "trend"])
+def test_r_restarts_from_any_screen(tmp_path, target):
+    app, clock = make_app(tmp_path)
+    drive(app, clock, KEY_SPACE)
+    for _ in range(5000):
+        if app.state == target:
+            break
+        key = KEY_SPACE if app.state in ("ready", "done", "results") else -1
+        drive(app, clock, key)
+    assert app.state == target
+    drive(app, clock, ord("r"))
+    assert app.state == "welcome" and app.results == {}
 
 
-def test_trend_screen_renders(tmp_path):
-    app, _, _ = run_session(tmp_path, tremor_on=False)
-    img = app.tick(ord("h"), 999.0, None)
-    assert app.state == "trend" and img.shape == (720, 1280, 3)
-    app.tick(KEY_SPACE, 999.1, None)
-    assert app.state == "results"
+def test_q_and_esc_quit(tmp_path):
+    for key in (ord("q"), 27):
+        app, clock = make_app(tmp_path)
+        drive(app, clock, key)
+        assert app.running is False
+
+
+class DeadDevice(MockDevice):
+    """Arduino unplugged: no data, connected=False."""
+    connected = False
+    status = "Arduino disconnected (COM9) - plug it back in"
+
+    def drain(self):
+        return []
+
+
+def test_disconnected_arduino_does_not_crash(tmp_path):
+    clock = FakeClock()
+    app, clock = make_app(tmp_path, device=DeadDevice(clock=clock))
+    img = drive(app, clock)
+    assert img.shape == (720, 1280, 3)
+    run_to_results(app, clock)
+    r = app.results[("tremor", "Right")].result
+    assert r.score is None and any("disconnected" in s for s in r.reasons)
+
+
+class NoHand(FakeHand):
+    ok = False
+    status = "Camera 0 unavailable"
+
+    def read(self, now, hand, detect):
+        return HandFrame(None, None, None)
+
+
+def test_missing_hand_or_camera_does_not_crash(tmp_path):
+    app, clock = make_app(tmp_path, hands=NoHand())
+    run_to_results(app, clock)
+    r = app.results[("tapping", "Left")].result
+    assert r.score is None and r.reasons
+
+
+def test_led_mapping():
+    assert led_for([0, 1, None]) == "G"
+    assert led_for([2, 0]) == "Y"
+    assert led_for([3, 0]) == "R" and led_for([4]) == "R"
+    assert led_for([None, None]) == "OFF"
+
+
+def test_t_toggles_fake_tremor(tmp_path):
+    app, clock = make_app(tmp_path)
+    drive(app, clock, ord("t"))
+    assert app.device.tremor_on is True
+    drive(app, clock, ord("t"))
+    assert app.device.tremor_on is False

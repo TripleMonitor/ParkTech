@@ -119,14 +119,17 @@ def trend_image(sessions: list[dict], width: int = 1280, height: int = 720) -> n
             ax.set_ylim(*ylim)
             ax.set_yticks(range(5))
         ax.grid(alpha=0.3)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+        if xs:
+            ax.set_xlim(min(xs) - timedelta(hours=12), max(xs) + timedelta(hours=12))
+        locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
         if ax.get_legend_handles_labels()[0]:
             ax.legend(loc="upper left", fontsize=10)
     if not sessions:
         fig.text(0.5, 0.5, "No sessions yet - run one, or start with --seed-history",
                  ha="center", fontsize=18)
     fig.suptitle("NeuroCheck trend  (demo thresholds - tracking aid, not a diagnosis)", fontsize=15)
-    fig.autofmt_xdate()
     fig.tight_layout()
     fig.canvas.draw()
     rgba = np.asarray(fig.canvas.buffer_rgba())
