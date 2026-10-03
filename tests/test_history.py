@@ -1,4 +1,6 @@
-from history import load_sessions, save_session, trend_image
+from datetime import datetime
+
+from history import load_sessions, save_session, seed_history, trend_image
 
 
 def test_save_and_load_roundtrip(tmp_path):
@@ -12,7 +14,24 @@ def test_save_and_load_roundtrip(tmp_path):
     assert "bogus" not in rows[0] and rows[0]["timestamp"]
 
 
-def test_trend_image_shape(tmp_path):
+def test_load_missing_file(tmp_path):
+    assert load_sessions(str(tmp_path / "nope.csv")) == []
+
+
+def test_seed_history_right_hand_worsens(tmp_path):
+    path = str(tmp_path / "s.csv")
+    rows = seed_history(path, days=7, now=datetime(2026, 10, 3, 12))
+    assert len(rows) == 7 and len(load_sessions(path)) == 7
+    assert rows[0]["timestamp"].startswith("2026-09-26")
+    r_tremor = [int(r["tremor_R"]) for r in rows]
+    r_tap = [int(r["tap_R"]) for r in rows]
+    assert r_tremor == sorted(r_tremor) and r_tremor[-1] > r_tremor[0]
+    assert r_tap == sorted(r_tap) and r_tap[-1] > r_tap[0]
+    assert all(r["tremor_L"] == "0" and r["tap_L"] == "0" for r in rows)
+
+
+def test_trend_image_shapes(tmp_path):
     assert trend_image([], 640, 360).shape == (360, 640, 3)
-    rows = [{"tremor_R": "1", "tremor_L": "0", "tap_R": "", "tap_L": "2"}] * 3
-    assert trend_image(rows, 640, 360).shape == (360, 640, 3)
+    rows = seed_history(str(tmp_path / "s.csv"))
+    img = trend_image(rows, 1280, 720)
+    assert img.shape == (720, 1280, 3) and img.std() > 10
