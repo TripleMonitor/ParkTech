@@ -72,7 +72,8 @@ def trend_image(sessions: list[dict], width: int = 1280, height: int = 720) -> n
         ax.set_yticks(range(5))
         ax.set_xlabel("Session #")
         ax.grid(alpha=0.3)
-        ax.legend(loc="upper left")
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(loc="upper left")
     if not sessions:
         fig.text(0.5, 0.5, "No sessions yet", ha="center", fontsize=20)
     fig.suptitle("NeuroCheck trend (demo thresholds - not a diagnosis)", fontsize=14)
