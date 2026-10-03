@@ -47,14 +47,15 @@ def run_to_results(app, clock):
     assert app.state == "results"
 
 
-@pytest.mark.parametrize("target", ["ready", "countdown", "recording", "done", "results", "trend"])
+@pytest.mark.parametrize("target", ["ready", "countdown", "recording", "done", "results",
+                                    "dashboard", "trend"])
 def test_r_restarts_from_any_screen(tmp_path, target):
     app, clock = make_app(tmp_path)
     drive(app, clock, KEY_SPACE)
     for _ in range(5000):
         if app.state == target:
             break
-        key = KEY_SPACE if app.state in ("ready", "done", "results") else -1
+        key = KEY_SPACE if app.state in ("ready", "done", "results", "dashboard") else -1
         drive(app, clock, key)
     assert app.state == target
     drive(app, clock, ord("r"))
@@ -174,3 +175,24 @@ def test_flipping_calibration_uses_ready_state(tmp_path):
     assert app.state == "ready" and app._palm_down() is True
     drive(app, clock, KEY_SPACE)
     assert app.calib == app.device.state
+
+
+def test_r_aborts_coach_and_turns_metronome_off(tmp_path):
+    app, clock = make_app(tmp_path)
+    drive(app, clock, ord("c"))
+    assert app.state == "coach" and app.coach.phase == "ready"
+    drive(app, clock, KEY_SPACE)
+    for _ in range(int(30 * 15)):              # countdown + uncued 10 s -> cued
+        drive(app, clock)
+    assert app.coach.phase == "cued" and app.device.cue
+    drive(app, clock, ord("r"))
+    assert app.state == "welcome" and app.device.cue is False
+
+
+def test_dose_input(tmp_path):
+    app, clock = make_app(tmp_path)
+    for k in (ord("1"), ord("."), ord("5"), 8, ord("7")):
+        drive(app, clock, k)
+    assert app.dose_hours == 1.7
+    drive(app, clock, ord("n"))
+    assert app.dose_hours is None and app.dose_unknown
