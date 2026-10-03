@@ -142,6 +142,9 @@ class Coach:
         return self.rate
 
 
+MIN_VALID_BEATS = 8                 # fewer answered beats -> "not measured"
+
+
 @dataclass(frozen=True)
 class CoachSummary:
     max_sustainable_rate: float     # beats (half-flips) per second
@@ -151,13 +154,31 @@ class CoachSummary:
     beats: int
     cued_rate: float                # patient half-flips/s in the last 10 s of cueing
     uncued_rate: float              # patient half-flips/s in the uncued phase
+    invalid_reason: str = ""        # non-empty -> result is not a measurement
+
+    @property
+    def valid(self) -> bool:
+        return not self.invalid_reason
 
 
 def summarise(coach: Coach, flips_cued: Sequence[float], cue_end: float,
               uncued_flips: int, uncued_s: float) -> CoachSummary:
     recs = coach.records
     if not recs:
-        return CoachSummary(0.0, None, None, 0, 0, 0.0, uncued_flips / uncued_s if uncued_s else 0.0)
+        return CoachSummary(0.0, None, None, 0, 0, 0.0, uncued_flips / uncued_s if uncued_s else 0.0,
+                            "no metronome beats received (check the Arduino)")
+    answered = sum(r.asynchrony is not None for r in recs)
+    on_time = sum(bool(r.on_time) for r in recs)
+    reason = ""
+    if len(recs) < MIN_VALID_BEATS:
+        reason = f"only {len(recs)} beats received (need {MIN_VALID_BEATS})"
+    elif answered < MIN_VALID_BEATS:
+        reason = (f"only {answered} of {len(recs)} beats answered by a flip - "
+                  "check the sensor is taped on and flipping")
+    elif on_time == 0:
+        reason = "no flip landed on a beat"
+    elif sum(r.asynchrony is not None for r in recs[-ROLLING_BEATS:]) == 0:
+        reason = "the patient stopped flipping before the end - tempo not established"
     t_end = recs[-1].t
     late = [r for r in recs if r.t >= t_end - SETTLE_WINDOW_S] or recs
     asyncs = [r.asynchrony * 1000 for r in recs if r.on_time]
@@ -168,7 +189,7 @@ def summarise(coach: Coach, flips_cued: Sequence[float], cue_end: float,
         on_time_rate=coach.on_time_rate(),
         missed=sum(r.on_time is None for r in recs), beats=len(recs),
         cued_rate=len(last) / SETTLE_WINDOW_S,
-        uncued_rate=uncued_flips / uncued_s if uncued_s else 0.0)
+        uncued_rate=uncued_flips / uncued_s if uncued_s else 0.0, invalid_reason=reason)
 
 
 # --------------------------------------------------------------------------- simulation

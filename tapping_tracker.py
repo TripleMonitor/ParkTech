@@ -35,6 +35,7 @@ class HandFrame(NamedTuple):
     label: Optional[str]               # "Left"/"Right" as seen by MediaPipe
     score: Optional[float] = None      # MediaPipe hand confidence (0..1)
     world: Optional[np.ndarray] = None # (21, 3) metres, MediaPipe world landmarks
+    t: Optional[float] = None          # capture time (same clock as the app)
 
     @property
     def distance(self) -> Optional[float]:
@@ -70,6 +71,9 @@ class CameraHand:
 
     def __init__(self, index: int = 0):
         self.telemetry = Telemetry()
+        self._index = index
+        self._fails_in_row = 0
+        self._reopen_at = 0.0
         t0 = time.perf_counter()
         self._cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         if not self._cap.isOpened():
@@ -100,27 +104,51 @@ class CameraHand:
         if not self.ok:
             return HandFrame(None, None, None)
         ok, raw = self._cap.read()
+        t_cap = time.perf_counter()                  # capture time, before inference
         if not ok or raw is None:
             self.status = "Camera read failed"
             self.telemetry.failed_reads += 1
+            self._fails_in_row += 1
+            self._try_reopen()
             return HandFrame(None, None, None)
+        self._fails_in_row = 0
         self.status = "Camera OK"
-        self.telemetry.frame(time.perf_counter())
+        self.telemetry.frame(t_cap)
         frame = cv2.flip(raw, 1)
         if not detect:
-            return HandFrame(frame, None, None)
-        t0 = time.perf_counter()
-        res = self._hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        self.telemetry.infer_ms.append((time.perf_counter() - t0) * 1000)
+            return HandFrame(frame, None, None, t=t_cap)
+        try:
+            res = self._hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        except Exception as exc:                     # never let MediaPipe take the demo down
+            self.status = f"MediaPipe error: {type(exc).__name__}"
+            log.error("MediaPipe process failed: %s", exc)
+            return HandFrame(frame, None, None, t=t_cap)
+        self.telemetry.infer_ms.append((time.perf_counter() - t_cap) * 1000)
         if not res.multi_hand_landmarks:
-            return HandFrame(frame, None, None)
+            return HandFrame(frame, None, None, t=t_cap)
         h, w = frame.shape[:2]
         pts = np.array([[p.x * w, p.y * h] for p in res.multi_hand_landmarks[0].landmark])
         cls = res.multi_handedness[0].classification[0]
         world = None
         if res.multi_hand_world_landmarks:
             world = np.array([[p.x, p.y, p.z] for p in res.multi_hand_world_landmarks[0].landmark])
-        return HandFrame(frame, pts, cls.label, float(cls.score), world)
+        return HandFrame(frame, pts, cls.label, float(cls.score), world, t_cap)
+
+    def _try_reopen(self) -> None:
+        """Camera unplugged/replugged: retry opening it at most every 2 s."""
+        now = time.perf_counter()
+        if self._fails_in_row < 15 or now - self._reopen_at < 2.0:
+            return
+        self._reopen_at = now
+        try:
+            self._cap.release()
+            cap = cv2.VideoCapture(self._index, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                self._cap = cap
+                self.status = "Camera reconnected"
+                log.info("camera reopened")
+        except Exception as exc:
+            log.error("camera reopen failed: %s", exc)
 
     def measure_fps(self, n: int = 20) -> Optional[float]:
         """Boot check: time n raw frame reads (no inference)."""
@@ -253,10 +281,10 @@ class FakeHand:
         if not detect:
             return HandFrame(frame, None, None)
         if test == "tremor":
-            return HandFrame(frame, self.palm_at(now, hand), hand, 1.0)
+            return HandFrame(frame, self.palm_at(now, hand), hand, 1.0, t=now)
         if test == "flipping":
-            return self._flipping_frame(frame, now, hand)
-        return HandFrame(frame, self.landmarks_for(self.distance_at(now, hand)), hand, 1.0)
+            return self._flipping_frame(frame, now, hand)._replace(t=now)
+        return HandFrame(frame, self.landmarks_for(self.distance_at(now, hand)), hand, 1.0, t=now)
 
     def _flipping_frame(self, frame: np.ndarray, now: float, hand: str) -> HandFrame:
         """Palm rotating about the forearm axis, following the (simulated) tilt switch."""

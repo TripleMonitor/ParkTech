@@ -37,14 +37,16 @@ class CoachSession:
         self.series: list[tuple] = []       # (t, tempo, patient_rate, on_time_rate)
         self._graph_at = 0.0
         self.summary: Optional[CoachSummary] = None
+        self.error = ""
         self.last_beep = 0
+        self._poll_at = 0.0
         device.request_state()
         if hasattr(device, "sim_hand"):
             device.sim_hand = hand
 
     # ---------------------------------------------------------------- control
     def start(self) -> None:
-        self.calib = self.device.state
+        self.calib = None                    # taken from the STATE reply sent with START
         self.phase, self.t_phase = "countdown", self.clock()
         self.last_beep = 0
 
@@ -59,6 +61,14 @@ class CoachSession:
     def tick(self) -> None:
         now = self.clock()
         el = now - self.t_phase
+        if self.phase in ("ready", "countdown") and now - self._poll_at >= 0.2:
+            self._poll_at = now
+            self.device.request_state()      # live PALM indicator stays fresh
+        if self.phase in ("uncued", "cued") and not self.device.connected:
+            self.abort()
+            self.error = "Arduino disconnected during the coach - result not measured"
+            self.phase, self.t_phase = "done", now
+            return
         if self.phase == "countdown":
             n = int(el) + 1
             if n <= COUNTDOWN_S and n > self.last_beep:
@@ -70,6 +80,8 @@ class CoachSession:
             return
         if self.phase in ("uncued", "cued"):
             self.events.extend(self.device.drain())
+            if self.calib is None and self.events:
+                self.calib = self.events[0].state
         if self.phase == "uncued":
             if el >= self.uncued_s:
                 self.uncued_flips = len(self._flip_times(self.t_phase))
@@ -115,7 +127,7 @@ class CoachSession:
     @property
     def palm_down(self) -> Optional[bool]:
         st = self.device.state
-        if st is None:
+        if st is None or not getattr(self.device, "state_fresh", True):
             return None
         return True if self.calib is None else st == self.calib
 

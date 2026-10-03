@@ -1,10 +1,14 @@
 # NeuroCheck — Parkinson's Motor Check Station
 
-A 1-minute tabletop check-up: wrist tremor (MPU6050 on an Arduino Uno) + finger tapping
-(webcam + MediaPipe). Each test is scored 0–4 with the rules that fired shown on screen,
-plus a left/right asymmetry flag and a trend chart across sessions.
+A tabletop check-up with three tests per hand, each scored 0–4 with every rule shown:
+**rest tremor** (webcam), **finger tapping** (webcam) and **rapid hand flipping** (SW-520D tilt
+switch + webcam fusion), plus a **PID rhythm coach**, a results dashboard with a transparent
+**NeuroScore**, a trend view, and **PDF / FHIR** exports.
 
 > **Tracking and decision-support tool, NOT a diagnosis. All thresholds are demo thresholds.**
+> Every number on screen is measured live or labelled **SIM** / **DEMO DATA**.
+
+![architecture](docs/architecture.png)
 
 ## 1. Install (Windows, one time)
 MediaPipe 0.10.14 needs Python 3.11 (3.13/3.14 have no wheels).
@@ -19,35 +23,36 @@ arduino-cli core update-index
 arduino-cli core install arduino:avr
 arduino-cli lib install "LiquidCrystal" "LiquidCrystal I2C"
 ```
-(The firmware reads the MPU6050 through raw I2C registers, so the Adafruit MPU6050 library
-is not needed — this also works with the many clone chips that Adafruit's `begin()` rejects.)
 Always run Python as `.venv\Scripts\python` (plain `python` may be a different version).
 
 ## 2. Wire (UNPLUG USB FIRST)
 | Part | Part pin | Arduino Uno |
 |---|---|---|
-| MPU6050 | VCC / GND / SDA / SCL | 5V / GND / A4 / A5 |
+| SW-520D bare 2-leg switch | leg 1 / leg 2 | D2 / GND (internal pull-up) |
+| SW-520D 3-pin module | VCC / GND / DO | 5V / GND / D2 |
 | Buzzer | + (long leg / red) / − | D8 / GND |
-| RGB LED | R / G / B (each via 220 Ω) | D9 / D10 / D11 |
+| RGB LED | R / G / B (each via 220 Ω) | D9 / D10 / D5 |
 | RGB LED | common (longest leg) | GND if common-cathode, 5V if common-anode |
 | LCD1602 I2C *(optional)* | VCC / GND / SDA / SCL | 5V / GND / A4 / A5 |
-| LCD1602 parallel *(optional)* | RS / E / D4 / D5 / D6 / D7 | D7 / D6 / D5 / D4 / D3 / D2 |
+| LCD1602 parallel *(optional)* | RS / E / D4 / D5 / D6 / D7 | D12 / D11 / D7 / D6 / D4 / D3 |
 | LCD1602 parallel | VSS / VDD / RW / K | GND / 5V / GND / GND |
 | LCD1602 parallel | A (backlight +) | 5V via 220 Ω |
-| LCD1602 parallel | V0 (contrast) | middle pin of 10 kΩ pot (outer pins 5V / GND) |
+| LCD1602 parallel | V0 (contrast) | middle of a 10 kΩ pot (outer pins 5V / GND) |
 
-The MPU6050 and an I2C LCD share A4/A5 — that's fine (different I2C addresses).
+The onboard LED (D13) mirrors the tilt switch, so you can check the sensor without the app.
+Blue is on D5 (not D11): a passive buzzer's `tone()` uses Timer2 and kills PWM on D3/D11.
+`tools/check_pins.py` proves there are no pin conflicts.
 
 ## 3. Configure + upload firmware
-Edit the three `#define`s at the top of `firmware/neurocheck/neurocheck.ino`:
-`BUZZER_PASSIVE` (0 active: sticker, sealed bottom / 1 passive: green board visible),
-`LED_COMMON_ANODE` (0/1), `LCD_MODE` (`LCD_NONE` / `LCD_I2C` / `LCD_PARALLEL`).
-Everything works with no LCD connected.
+Edit the four `#define`s at the top of `firmware/neurocheck/neurocheck.ino`:
+`SWITCH_MODULE` (0 bare switch / 1 3-pin module), `BUZZER_PASSIVE` (0 active: sticker, sealed
+bottom / 1 passive: green board visible), `LED_COMMON_ANODE` (0/1),
+`LCD_MODE` (`LCD_NONE` / `LCD_I2C` / `LCD_PARALLEL`). Everything works with no LCD.
 ```powershell
 arduino-cli board list                                   # find the COM port
 arduino-cli compile --fqbn arduino:avr:uno firmware\neurocheck
 arduino-cli upload  --fqbn arduino:avr:uno -p COM5 firmware\neurocheck
-bash firmware/compile_all.sh                             # compile all 12 #define combinations
+bash firmware/compile_all.sh                             # all 24 #define combinations + pin check
 ```
 Close the app (or any serial monitor) before uploading — only one program can own the port.
 
@@ -55,67 +60,63 @@ Close the app (or any serial monitor) before uploading — only one program can 
 ```powershell
 .venv\Scripts\python app.py                    # real Arduino (auto-detect) + webcam
 .venv\Scripts\python app.py --port COM5        # force a port
-.venv\Scripts\python app.py --sim              # no hardware: fake IMU + fake hand
-.venv\Scripts\python app.py --sim-device       # fake IMU + real webcam
-.venv\Scripts\python app.py --sim --seed-history   # add 7 days of fake history first
-.venv\Scripts\python app.py --seconds 5        # shorter tests (5-60 s)
+.venv\Scripts\python app.py --sim              # no hardware: fake switch + fake hand (all labelled SIM)
+.venv\Scripts\python app.py --sim-device       # fake switch + real webcam
+.venv\Scripts\python app.py --seed-history     # add 14 days x 2 sessions of DEMO DATA first
+.venv\Scripts\python app.py --no-boot          # skip the boot self-check
 .venv\Scripts\python -m pytest                 # unit + app tests
 .venv\Scripts\python selftest.py --screens screenshots   # headless full session, PASS/FAIL table
+.venv\Scripts\python tools/gui_smoke.py        # scripted real-window run, screenshots
+.venv\Scripts\python tools/tune_pid.py         # re-tune the coach on the simulated patient
 ```
-Keys: **SPACE** next · **R** restart (any screen) · **Q/ESC** quit · **H** trend (welcome/results) ·
-**T** toggle fake 5 Hz tremor (sim device only).
+**Keys:** SPACE next · **R** restart (any screen) · **Q/ESC** quit · **H** trend ·
+**C** rhythm coach (welcome/results; **L** switches hand) · **P** doctor PDF · **F** FHIR JSON
+(results/dashboard) · on Welcome type the hours since the last levodopa dose (**N** = unknown).
+Sim only: **T** toggle fake tremor, **F** fake stuck sensor (during tests).
 
-Each test has a **Ready** screen (live camera / sensor preview) — press SPACE when positioned.
+Exports land in `exports/` next to `sessions.csv`.
 
-If the Arduino is unplugged the header turns red and it reconnects automatically (LED, LCD and
-streaming are restored). A firmware `ERROR` (e.g. MPU6050 not responding) or a missing `READY`
-shows as an orange bar under the header. A tremor test with less than 80 % of the planned data
-shows "-" with the reason instead of a score.
+## 5. Screens
+1. **Boot self-check** — camera + FPS, MediaPipe load time, Arduino port, READY, STATE round
+   trip, tilt reading, buzzer + LED test (SIM in simulation).
+2. **Welcome** — protocol + dose question.
+3. **Tests** (6) — Ready → 3-2-1 → 10 s recording → WHY THIS SCORE panel (every rule, measured
+   value vs threshold). Live: glowing landmarks, scan line, live signal, SIGNAL QUALITY meter;
+   flipping adds PALM UP/DOWN, tilt trace, flip timeline and the camera rotation gauge with
+   FUSION LOCKED / MISMATCH.
+4. **Results** — 6 cards with all reasons, LOW CONFIDENCE badges, asymmetry line; LED colour
+   (green 0–1, yellow 2, red 3–4) and LCD summary.
+5. **Dashboard** — Motor Fingerprint radar (R/L), NeuroScore with its formula.
+6. **Trend** — NeuroScore over time, NeuroScore vs hours since dose, per-hand sub-scores
+   (seeded points hollow, labelled DEMO DATA).
+7. **Rhythm coach** (C) — 10 s uncued, 35 s metronome with a PID adapting the tempo to an 85 %
+   on-time target; result: max sustainable rhythm, asynchrony, cued vs uncued rate.
 
-## 5. Demo script (~3 min)
-1. Before the audience arrives: `app.py --seed-history` once (or `--sim --seed-history` as backup).
-2. **Welcome** — "one-minute check, four 10-second tests, every score explained".
-3. **Right tremor** — sensor on wrist, forearm resting, shake ~5 Hz. Point at the live x/y/z chart.
-   Done screen: spectrum with the 4–6 Hz band shaded and the peak marked → score + reasons.
-4. **Left tremor** — hold still → score 0 "no clear tremor".
-5. **Right tapping** — tap slowly / small to show problems; live skeleton, distance graph, tap count.
-6. **Left tapping** — tap fast and big → score 0.
-7. **Results** — four cards with every rule that fired, the ASYMMETRY line, LED colour + LCD.
-8. **Trend** (SPACE) — the seeded week shows the right hand slowly worsening.
-9. Close: "tracking tool for between clinic visits, not a diagnosis".
-Backup: `app.py --sim`, press **T** during the right tremor test.
+## 6. Scoring (demo thresholds; constants at the top of `scoring.py`)
+- **Tremor** (3.17 style): fingertip in cm (hand wrist→middle-MCP = 9 cm), 30 Hz, 1 Hz high-pass,
+  FFT x+y, clear peak 3–8 Hz (≥ 3× median, local max), band-limited amplitude.
+  0: < 0.1 cm / no peak · 1: < 1 · 2: 1–3 · 3: 3–10 · 4: ≥ 10 cm.
+- **Finger tapping** (3.4 style): slow < 2 taps/s, small < 0.5, decrement > 30 %, CV > 0.3,
+  any hesitation → score = problems (max 3); < 5 taps → 4.
+- **Hand flipping** (3.6 style): slow < 1.5 full flips/s, CV > 0.35, slowdown > 25 %, any
+  hesitation, small rotation < 120°, rotation shrink > 25 % → problems (max 3); < 5 flips → 4.
+- **Asymmetry**: ≥ 1 point, or ≥ 25 % on taps/s, flips/s or tremor cm.
+- **NeuroScore** = 100 × (1 − Σ scores / (4 × scored tests)). Composite tracking index.
 
-## Scoring (all in `scoring.py`, constants at the top)
-**Tremor** (MDS-UPDRS 3.17 style): subtract each axis' mean (gravity), detrend, Hann FFT per axis,
-sum power. Peak = max in 3–8 Hz; clear if ≥ 3× the median power in the band **and** a true local
-maximum (so leakage from movement just outside the band isn't counted). Amplitude = sinusoid
-amplitude on the strongest axis, measured as band-limited RMS within ±0.75 Hz of the peak
-(A = √2·RMS), so tremor that drifts in frequency isn't under-read; displacement = a/(2πf)² × 100 cm.
-Per spec only the strongest axis counts, so diagonal tremor reads up to ~30 % low.
-0: < 0.1 cm or no clear peak · 1: < 1 cm · 2: 1–3 cm · 3: 3–10 cm · 4: ≥ 10 cm.
-Also reports the % of 1-second windows showing tremor.
-
-**Tapping** (MDS-UPDRS 3.4 style): thumb-tip–index-tip distance / wrist–middle-MCP length; each
-opening is a tap. Problems: slow (< 2 taps/s), small (amplitude < 0.5), decrement > 30 % (first vs
-last 3 s), irregular (interval CV > 0.3), any hesitation (gap > 2× median).
-Score = number of problems (max 3); 4 if fewer than 5 taps. Hand visible < 50 % → not scored.
-If MediaPipe loses the hand for > 0.15 s, the tap intervals spanning that gap are ignored for
-rhythm/hesitations (a tracking dropout is not a patient hesitation) and a note is shown.
-
-**Asymmetry**: flagged if R/L differ by ≥ 1 point, or ≥ 25 % in taps/s or tremor displacement.
-The % is relative to the larger side (4.0 vs 3.0 taps/s = 25 %). Displacement only counts when
-there is a clear tremor peak and is only compared once either side is ≥ 0.1 cm; taps/s is only
-compared when both hands could be scored.
+## 7. Demo script
+See the summary in `VERIFICATION.md` and the 3-minute script given with this build.
 
 ## Files
 | File | What |
 |---|---|
-| `app.py` | OpenCV window, state machine, keyboard, main |
-| `ui.py` | drawing helpers, live accel chart, spectrum chart, score cards |
-| `device.py` | `ArduinoDevice` (auto-detect, READY, reconnect) + `MockDevice` |
-| `tremor_analysis.py` / `tapping_analysis.py` / `scoring.py` | pure maths, fully unit-tested |
-| `tapping_tracker.py` | `CameraHand` (MediaPipe), `FakeHand`, skeleton + graph drawing |
-| `history.py` | `sessions.csv`, `seed_history()`, trend chart |
-| `selftest.py` | headless full session with PASS/FAIL table |
-| `tools/gui_smoke.py` | scripted 60 s+ run of the real window with injected keys |
-| `firmware/neurocheck/neurocheck.ino` | Uno firmware; `firmware/compile_all.sh` builds all variants |
+| `app.py` | state machine, keys, main loop |
+| `hud.py`, `ui.py` | HUD header/telemetry/boot screen, drawing, charts, panels |
+| `boot.py` | boot self-check (real checks, background thread) |
+| `device.py` | `ArduinoDevice` (auto-detect, READY, reconnect, writer thread) + `MockDevice` |
+| `tapping_tracker.py` | `CameraHand` (MediaPipe + telemetry), `FakeHand`, hand drawing |
+| `tremor_analysis.py`, `tapping_analysis.py`, `flipping_analysis.py`, `fusion.py`, `quality.py` | pure signal maths |
+| `scoring.py` | scores, reasons, WHY-panel rules, asymmetry |
+| `pid.py`, `rhythm_coach.py`, `coach_session.py` | PID, coach logic + simulated patient, live session |
+| `dashboard.py`, `history.py`, `report.py`, `fhir.py` | NeuroScore/radar, CSV + trend, PDF, FHIR |
+| `selftest.py`, `tools/gui_smoke.py`, `tools/tune_pid.py`, `tools/check_pins.py` | verification |
+| `firmware/neurocheck/neurocheck.ino` | Uno firmware |

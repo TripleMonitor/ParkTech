@@ -60,16 +60,16 @@ def wait_for(cond, timeout=3.0):
 
 def test_ready_handshake_and_switch_events(fake_serial):
     fake_serial.scripts = [[b"boot noise\r\n", b"READY\r\n", b"S,1000,1\r\n",
-                            b"S,1250,", b"S,1500,0\r\n"]]              # 2nd is partial
+                            b"S,12", b"50,0\r\n", b"S,1500,1\r\n"]]  # line split by a timeout
     dev = ArduinoDevice(port="FAKE")
     try:
         assert wait_for(lambda: dev.connected)
         assert dev.warning == ""
-        assert wait_for(lambda: dev._events.qsize() >= 2)
+        assert wait_for(lambda: dev._events.qsize() >= 3)
         events = dev.drain()
-        assert [e.state for e in events] == [1, 0]                    # partial line ignored
-        assert events[1].t - events[0].t == pytest.approx(0.5, abs=0.05)   # Arduino timing
-        assert dev.state == 0
+        assert [e.state for e in events] == [1, 0, 1]                 # split line re-joined
+        assert events[2].t - events[0].t == pytest.approx(0.5, abs=0.05)   # Arduino timing
+        assert dev.state == 1
     finally:
         dev.close()
 
@@ -144,5 +144,33 @@ def test_commands_while_disconnected_are_dropped(fake_serial):
     try:
         dev.beep(2)          # not connected yet: dropped, no exception
         assert dev._writes.empty()
+    finally:
+        dev.close()
+
+
+def test_cue_restored_after_reconnect_and_off_on_close(fake_serial):
+    fake_serial.scripts = [[b"READY\r\n"], [b"READY\r\n"]]
+    dev = ArduinoDevice(port="FAKE")
+    try:
+        assert wait_for(lambda: dev.connected)
+        dev.cue_on(500)
+        dev.tempo(450)
+        first = FakeSerial.opened[0]
+        assert wait_for(lambda: "TEMPO,450" in first.written)
+        first.lines.append(serial.SerialException("unplugged"))
+        assert wait_for(lambda: len(FakeSerial.opened) == 2 and dev.connected)
+        assert wait_for(lambda: "CUE,ON,450" in FakeSerial.opened[1].written)
+    finally:
+        dev.close()
+    assert "CUE,OFF" in FakeSerial.opened[1].written
+
+
+def test_state_cleared_on_disconnect(fake_serial):
+    fake_serial.scripts = [[b"READY\r\n", b"S,5,1\r\n"]]
+    dev = ArduinoDevice(port="FAKE")
+    try:
+        assert wait_for(lambda: dev.state == 1)
+        FakeSerial.opened[0].lines.append(serial.SerialException("unplugged"))
+        assert wait_for(lambda: not dev.connected and dev.state is None)
     finally:
         dev.close()

@@ -130,3 +130,11 @@ def test_mock_records_outputs():
 
 def test_profiles_are_distinct():
     assert IMPAIRED_FLIPS.rate < NORMAL_FLIPS.rate and IMPAIRED_FLIPS.pauses
+
+
+def test_clock_mapper_tracks_slow_arduino_clock():
+    """Arduino 0.2% slow: after 10 minutes the mapping must not lag by ~1 s."""
+    m = ClockMapper()
+    for k in range(0, 601):                       # one report per second for 10 min
+        m.observe(k * 1000 * 0.998, 1000.0 + k + 0.003)
+    assert m.to_pc(600 * 1000 * 0.998) == pytest.approx(1600.0, abs=0.05)

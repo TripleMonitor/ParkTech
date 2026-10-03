@@ -26,11 +26,13 @@ def test_failed_reads_counted():
     assert q.dropped_frames == 40 and q.low
 
 
-def test_low_detection_and_confidence_flagged():
+def test_low_detection_flagged_handedness_is_info_only():
     det = [i % 2 == 0 for i in range(300)]
     q = signal_quality(frames(), det, [0.5] * 300)
     assert q.detected == pytest.approx(0.5) and q.confidence == pytest.approx(0.5)
-    assert q.low and len(q.problems) == 2
+    assert q.low and len(q.problems) == 1
+    q2 = signal_quality(frames(), [True] * 300, [0.3] * 300)
+    assert not q2.low                       # handedness score never triggers LOW CONFIDENCE
 
 
 def test_empty():

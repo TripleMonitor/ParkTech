@@ -6,7 +6,7 @@ Tests per hand: rest tremor (webcam), finger tapping (webcam), hand flipping (SW
   python app.py                 real Arduino (auto-detect port) + webcam
   python app.py --sim           MockDevice + FakeHand: no hardware at all
   python app.py --sim-device    MockDevice + real webcam
-  python app.py --seed-history  add 7 days of fake sessions first (for the trend demo)
+  python app.py --seed-history  add 14 days x 2 sessions of DEMO DATA first (trend demo)
 
 Keys: SPACE next   R restart   Q/ESC quit   H trend
       sim only: T toggle fake tremor   F toggle fake flip sensor (stuck)
@@ -147,7 +147,8 @@ class App:
         self.dose_unknown = False
         self.radar_img: Optional[np.ndarray] = None
         self.export_msg = ""
-        self.started_at = datetime.now().isoformat(timespec="seconds")
+        self.started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        self._poll_at = 0.0
         self.last_beep = 0
         self.device.led("OFF")
         self.device.lcd("NeuroCheck", "Press SPACE")
@@ -203,7 +204,7 @@ class App:
         self._goto("countdown", now)
         self.last_beep = 0
         if kind == "flipping":
-            self.calib = self.device.state     # palm-down reference (None if no reply yet)
+            self.calib = None                  # set from the STATE reply sent with START
             if hasattr(self.device, "sim_hand"):
                 self.device.sim_hand = hand
         self.hands.reset(now + COUNTDOWN_S)
@@ -257,7 +258,7 @@ class App:
         img = None
         try:
             img = ui.spectrum_image(f.freqs, f.power, f.peak_hz, f.displacement_cm,
-                                    r.score, 720, 540)
+                                    r.score, 720, 540, clear_peak=f.clear_peak)
         except Exception:   # a chart must never take the demo down
             log.exception("spectrum render failed")
         return TestResult("tremor", hand, f, r, img, q)
@@ -306,6 +307,9 @@ class App:
         except OSError as exc:
             log.error("Could not save session: %s", exc)
             self.save_msg = f"NOT saved: {exc.strerror} (is {self.history_path} open in Excel?)"
+        except Exception as exc:              # corrupt CSV etc.
+            log.exception("Could not save session")
+            self.save_msg = f"NOT saved: {type(exc).__name__} - check {self.history_path}"
 
     @property
     def dose_hours(self) -> Optional[float]:
@@ -339,14 +343,15 @@ class App:
         for (kind, hand), tr in self.results.items():
             f = tr.features
             feats = {}
-            if isinstance(f, TremorFeatures) and f.valid:
-                feats = {"peak_hz": f.peak_hz, "displacement_cm": effective_displacement_cm(f)}
+            if isinstance(f, TremorFeatures) and f.valid and f.clear_peak \
+                    and tr.result.score is not None:
+                feats = {"peak_hz": f.peak_hz, "displacement_cm": f.displacement_cm}
             elif isinstance(f, TappingFeatures) and tr.result.score is not None:
                 feats = {"taps_per_sec": f.taps_per_sec, "mean_amplitude": f.mean_amplitude,
                          "decrement": f.decrement}
             elif isinstance(f, FlippingFeatures) and tr.result.score is not None:
                 feats = {"flips_per_sec": f.flips_per_sec, "interval_cv": f.interval_cv}
-                if tr.fusion is not None and tr.fusion.camera_ok:
+                if tr.fusion is not None and tr.fusion.camera_ok and tr.fusion.camera_half_flips:
                     feats["median_amplitude_deg"] = tr.fusion.median_amplitude_deg
             tests.append({"kind": kind, "hand": hand, "score": tr.result.score,
                           "reasons": list(tr.result.reasons), "features": feats})
@@ -390,12 +395,15 @@ class App:
     def _save_coach_row(self, hand: str, summary) -> None:
         try:
             history.save_session({"session_id": self.session_id,
+                                  "mode": "LIVE" if not (self.sim_hand or self.sim_dev) else "SIM",
                                   f"coach_{hand[0]}_rate": summary.max_sustainable_rate},
                                  self.history_path)
-        except OSError as exc:
+        except Exception as exc:
             log.error("Could not save coach result: %s", exc)
 
     def _enter_trend(self, now: float) -> None:
+        self.trend_return = self.state if self.state in ("welcome", "results", "dashboard") \
+            else "welcome"
         self._goto("trend", now)
         try:
             self.trend_img = history.trend_image(history.load_sessions(self.history_path),
@@ -423,25 +431,30 @@ class App:
 
     def _session_row(self) -> dict:
         row: dict = {"asymmetry": " ; ".join(self.flags), "session_id": self.session_id,
+                     "mode": "LIVE" if not (self.sim_hand or self.sim_dev) else "SIM",
                      "dose_hours": self.dose_hours, "neuroscore": self._neuroscore()[0]}
         for hand, s in self.coach_results.items():
             row[f"coach_{hand[0]}_rate"] = s.max_sustainable_rate
         for (kind, hand), tr in self.results.items():
             side, f = hand[0], tr.features
+            scored = tr.result.score is not None
             if isinstance(f, TremorFeatures):
+                peak = scored and f.valid and f.clear_peak
                 row.update({f"tremor_{side}": tr.result.score,
-                            f"tremor_{side}_cm": effective_displacement_cm(f) if f.valid else None,
-                            f"tremor_{side}_hz": f.peak_hz if f.valid else None})
+                            f"tremor_{side}_cm": f.displacement_cm if peak else None,
+                            f"tremor_{side}_hz": f.peak_hz if peak else None})
             elif isinstance(f, TappingFeatures):
                 row.update({f"tap_{side}": tr.result.score,
-                            f"tap_{side}_rate": f.taps_per_sec, f"tap_{side}_amp": f.mean_amplitude})
+                            f"tap_{side}_rate": f.taps_per_sec if scored else None,
+                            f"tap_{side}_amp": f.mean_amplitude if scored else None})
             elif isinstance(f, FlippingFeatures):
                 ok = tr.result.score is not None
                 fu = tr.fusion
                 row.update({f"flip_{side}": tr.result.score,
                             f"flip_{side}_rate": f.flips_per_sec if ok else None,
                             f"flip_{side}_amp_deg": fu.median_amplitude_deg
-                            if fu is not None and fu.camera_ok else None})
+                            if ok and fu is not None and fu.camera_ok and fu.camera_half_flips
+                            else None})
         return row
 
     # ---------------------------------------------------------------- input
@@ -453,7 +466,7 @@ class App:
         go = key in (KEY_SPACE, KEY_ENTER)
         if key == KEY_ESC or ch == "q":
             self.running = False
-        elif ch == "r" and self.state != "boot":
+        elif ch == "r":
             self.restart(now)
         elif ch == "t" and hasattr(self.hands, "tremor_enabled"):
             self.hands.tremor_enabled = not self.hands.tremor_enabled
@@ -478,7 +491,7 @@ class App:
             if self.coach.phase == "ready":
                 self.coach.start()
             elif self.coach.phase == "done":
-                if self.coach.summary is not None:
+                if self.coach.summary is not None and self.coach.summary.valid:
                     self.coach_results[self.coach.hand] = self.coach.summary
                     if self.coach_return == "results":     # session row already saved
                         self._save_coach_row(self.coach.hand, self.coach.summary)
@@ -504,7 +517,7 @@ class App:
         elif self.state == "dashboard":
             self._enter_trend(now)
         elif self.state == "trend":
-            self.restart(now)
+            self._goto(getattr(self, "trend_return", "welcome"), now)
 
     # ---------------------------------------------------------------- update
     def update(self, now: float) -> None:
@@ -527,7 +540,7 @@ class App:
         recording = self.state == "recording"
         if active and kind in ("tremor", "tapping"):
             self.hf = self.hands.read(now, hand, detect=True, test=kind)
-            t_frame = self.clock()                   # stamp after the (blocking) camera read
+            t_frame = self.hf.t if self.hf.t is not None else self.clock()   # capture time
             if recording:
                 self.q_t.append(t_frame)
                 self.q_det.append(self.hf.landmarks is not None)
@@ -547,7 +560,7 @@ class App:
                 self._update_live_taps(now)
         if kind == "flipping" and active:
             self.hf = self.hands.read(now, hand, detect=True, test="flipping")
-            t_frame = self.clock()
+            t_frame = self.hf.t if self.hf.t is not None else self.clock()
             if self.hf.world is not None and not recording:
                 n = palm_normal(self.hf.world)
                 if n is not None:
@@ -556,11 +569,16 @@ class App:
                 self.fl_t.append(t_frame)
                 self.fl_world.append(self.hf.world)
                 self.events.extend(self.device.drain())
+                if self.calib is None and self.events:
+                    self.calib = self.events[0].state  # first report after START = palm-down
                 self.device_lost |= not self.device.connected
                 self._update_live_flips(now)
                 self._update_fusion()
             else:
                 self.device.drain()                  # discard stray reports before START
+                if self.clock() - self._poll_at >= 0.2:
+                    self._poll_at = self.clock()
+                    self.device.request_state()      # keep the live PALM indicator fresh
 
         if recording and elapsed >= self.seconds:
             self._finish_test(now)
@@ -589,14 +607,14 @@ class App:
         self.flip_angle = current_angle(self.fl_world[-3:], self.flip_ref)
 
     def _palm_down(self) -> Optional[bool]:
-        """Ready: the patient is told to hold palm-down, so the current state IS palm-down.
-        Afterwards: compare with the state captured when SPACE was pressed."""
+        """Ready/countdown: the patient is told to hold palm-down, so a FRESH reading is
+        palm-down. Recording: compare with the state reported at START. Stale -> None."""
         state = self.device.state
-        if state is None:
+        if state is None or not getattr(self.device, "state_fresh", True):
             return None
-        if self.state == "ready":
-            return True
-        return None if self.calib is None else state == self.calib
+        if self.state in ("ready", "countdown") or self.calib is None:
+            return True if self.state in ("ready", "countdown") else None
+        return state == self.calib
 
     def tick(self, key: int, now: float) -> np.ndarray:
         self.handle_key(key, now)
@@ -634,6 +652,8 @@ class App:
         status = dev.status
         if hasattr(self.hands, "tremor_enabled"):
             status += f" | fake tremor {'ON' if self.hands.tremor_enabled else 'off'}"
+        if getattr(self.device, "flipping", True) is False:
+            status += " | STUCK SENSOR (SIM)"
         hud.header(c, self.session_id, self.test[1].upper() if in_test else None,
                    live=not (self.sim_hand or self.sim_dev), status=status,
                    status_ok=dev.connected)
@@ -686,6 +706,15 @@ class App:
 
     def _draw_coach_done(self, c, co) -> None:
         s = co.summary
+        if s is None or not s.valid:
+            ui.panel(c, 20, 140, 1240, 460)
+            ui.text(c, "COACH RESULT: NOT MEASURED", (40, 190), 0.8, ui.REC, 2)
+            why = co.error or (s.invalid_reason if s is not None else "no data")
+            for i, line in enumerate(ui.wrap(why, 1160, 0.6)[:4]):
+                ui.text(c, line, (40, 240 + i * 34), 0.6, ui.WHITE)
+            ui.text(c, "Nothing is saved or exported for this run.", (40, 400), 0.55, ui.GREY)
+            ui.text(c, "SPACE to continue", (40, 560), 0.7, ui.ACCENT, 2)
+            return
         ui.panel(c, 20, 140, 600, 460)
         ui.text(c, "COACH RESULT", (40, 180), 0.7, ui.ACCENT, 2)
         rows = [("Max sustainable rhythm", f"{s.max_sustainable_rate:.2f} beats/s"),
@@ -765,7 +794,7 @@ class App:
             ui.brackets(c, 20, 135, 360, 270)
             if self.state == "recording":
                 hud.scan_line(c, 20, 135, 360, 270, self.clock())
-        angle = self.flip_angle if self.state == "recording" else (0.0 if self.hf.world is not None else None)
+        angle = self.flip_angle if self.state == "recording" else None
         ui.rotation_gauge(c, 392, 135, 348, 270, angle, self.fusion if self.state == "recording" else None,
                           len(self.flip_times))
         ui.flip_indicator(c, self._palm_down(), 20, 415, 720, 70)
@@ -773,7 +802,8 @@ class App:
         if self.state == "ready":
             ui.panel(c, 20, 580, 720, 75)
             ui.centred(c, "Calibrating: hold your hand PALM-DOWN", 612, 0.6, ui.WARN, 2, 20, 740)
-            st = self.device.state if self.device.state is not None else "?"
+            fresh = self.device.state is not None and getattr(self.device, "state_fresh", True)
+            st = self.device.state if fresh else "?"
             ui.centred(c, f"switch reads {st}  (this state = palm-down)", 640, 0.45, ui.GREY, 1, 20, 740)
             return
         elapsed = (self.clock() - self.rec_start) if self.state == "recording" else None
@@ -903,8 +933,12 @@ class App:
         y = 628
         if self.flags:
             ui.text(c, "ASYMMETRY", (20, y + 14), 0.65, ui.WARN, 2)
-            for j, part in enumerate(ui.wrap("  |  ".join(self.flags), ui.W - 210, 0.46)[:2]):
-                ui.text(c, part, (165, y + 12 + j * 20), 0.46, ui.WARN)
+            lines = ui.wrap(" | ".join(self.flags), ui.W - 200, 0.42)
+            if len(lines) > 3:
+                lines = lines[:3]
+                lines[2] = lines[2][:max(0, len(lines[2]) - 14)] + " (+ more)"
+            for j, part in enumerate(lines):
+                ui.text(c, part, (165, y + 8 + j * 16), 0.42, ui.WARN)
         else:
             ui.text(c, "No left/right asymmetry flagged", (20, y + 14), 0.6, ui.GREY)
 
@@ -944,7 +978,7 @@ class App:
         else:
             h = min(self.trend_img.shape[0], hud.HINT_Y - 22)
             c[:h] = self.trend_img[:h]
-        self._draw_footer(c, "SPACE new session   R restart   Q quit")
+        self._draw_footer(c, "SPACE back   R new session   Q quit")
         return c
 
 
@@ -988,7 +1022,8 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("--sim", action="store_true", help="MockDevice + FakeHand (no hardware)")
     p.add_argument("--sim-device", action="store_true", help="MockDevice + real webcam")
-    p.add_argument("--seed-history", action="store_true", help="add 7 days of fake sessions")
+    p.add_argument("--seed-history", action="store_true",
+                   help="add 14 days x 2 sessions of DEMO DATA")
     p.add_argument("--port", help="serial port, e.g. COM5 (default: auto-detect)")
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--seconds", type=_seconds, default=10.0,

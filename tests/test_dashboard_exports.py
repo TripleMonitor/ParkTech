@@ -9,7 +9,7 @@ from report import save_pdf
 
 
 def snapshot(**over):
-    s = {"session_id": "NC-TEST", "timestamp": "2026-10-03T15:00:00", "mode": "SIM",
+    s = {"session_id": "NC-TEST", "timestamp": "2026-10-03T15:00:00-07:00", "mode": "LIVE",
          "dose_hours": 2.5, "neuroscore": 75.0, "neuroscore_formula": "NeuroScore = ...",
          "asymmetry": ["Tremor: Right worse (R 2 vs L 0)"], "coach_rates": {"Right": 2.3},
          "tests": [
@@ -72,3 +72,17 @@ def test_pdf_export(tmp_path):
     out = save_pdf(snapshot(), load_sessions(path), str(tmp_path / "r.pdf"))
     data = open(out, "rb").read()
     assert data.startswith(b"%PDF") and len(data) > 5000
+
+
+def test_fhir_sim_session_is_tagged_preliminary():
+    b = build_bundle(snapshot(mode="SIMULATION"))
+    assert validate_bundle(b) == []
+    assert b["meta"]["tag"][0]["code"] == "SIM"
+    obs = [e["resource"] for e in b["entry"] if e["resource"]["resourceType"] == "Observation"]
+    assert all(o["status"] == "preliminary" and o["meta"]["tag"][0]["code"] == "SIM" for o in obs)
+    assert all(o["note"][0]["text"] == "SIMULATION - not measured" for o in obs)
+
+
+def test_fhir_requires_timezone():
+    b = build_bundle(snapshot(timestamp="2026-10-03T15:00:00"))
+    assert any("timezone" in e for e in validate_bundle(b))

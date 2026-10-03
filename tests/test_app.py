@@ -174,7 +174,11 @@ def test_flipping_calibration_uses_ready_state(tmp_path):
         drive(app, clock, KEY_SPACE if app.state in ("ready", "done") else -1)
     assert app.state == "ready" and app._palm_down() is True
     drive(app, clock, KEY_SPACE)
-    assert app.calib == app.device.state
+    assert app.calib is None                  # not taken from a possibly stale cache
+    while app.state != "recording":
+        drive(app, clock)
+    drive(app, clock)
+    assert app.calib == 1                     # = the STATE reply sent with START
 
 
 def test_r_aborts_coach_and_turns_metronome_off(tmp_path):
@@ -196,3 +200,80 @@ def test_dose_input(tmp_path):
     assert app.dose_hours == 1.7
     drive(app, clock, ord("n"))
     assert app.dose_hours is None and app.dose_unknown
+
+
+class StaleStateDevice(MockDevice):
+    """Real-Arduino behaviour: the cached state is NOT updated outside recording, so it can
+    be stale (here: opposite of the true palm-down state) when SPACE is pressed."""
+
+    def request_state(self):
+        pass                                   # reply lost / not yet arrived
+
+    def start(self):
+        super().start()                        # STATE reply at START carries the truth
+
+
+def test_stale_cached_state_does_not_break_flipping_calibration(tmp_path):
+    from device import NORMAL_FLIPS
+    clock = FakeClock()
+    dev = StaleStateDevice(clock=clock, profiles={"Right": NORMAL_FLIPS, "Left": NORMAL_FLIPS})
+    app, clock = make_app(tmp_path, device=dev, seconds=10.0)
+    dev._clock = clock
+    app.hands.flip_amp_deg["Right"], app.hands.flip_amp_shrink["Right"] = 165.0, 0.0
+    drive(app, clock, KEY_SPACE)
+    while app.test[0] != "flipping":
+        drive(app, clock, KEY_SPACE if app.state in ("ready", "done") else -1)
+    true_state = dev.state
+    dev.state = 1 - true_state                 # stale cached value at SPACE time
+    drive(app, clock, KEY_SPACE)               # -> countdown
+    dev.state = true_state                     # the switch really is palm-down
+    while app.state != "done":
+        drive(app, clock)
+    assert app.calib == true_state
+    r = app.results[("flipping", "Right")]
+    assert r.result.score == 0, r.result.reasons
+    assert r.features.half_flips % 2 == 0 or r.features.half_flips > 30
+
+
+def test_coach_with_no_flips_is_not_measured_and_not_saved(tmp_path):
+    app, clock = make_app(tmp_path)
+    app.device.flipping = False
+    drive(app, clock, ord("c"))
+    drive(app, clock, KEY_SPACE)
+    for _ in range(int(30 * 50)):
+        drive(app, clock)
+        if app.coach.phase == "done":
+            break
+    assert app.coach.phase == "done"
+    assert app.coach.summary is not None and not app.coach.summary.valid
+    drive(app, clock, KEY_SPACE)
+    assert app.coach_results == {}
+
+
+def test_coach_aborts_on_disconnect(tmp_path):
+    app, clock = make_app(tmp_path)
+    drive(app, clock, ord("c"))
+    drive(app, clock, KEY_SPACE)
+    for _ in range(30 * 5):
+        drive(app, clock)
+    type(app.device).connected = property(lambda self: False)
+    try:
+        drive(app, clock)
+        assert app.coach.phase == "done" and "disconnected" in app.coach.error
+    finally:
+        type(app.device).connected = True
+
+
+def test_sim_session_row_is_marked_sim(tmp_path):
+    app, clock = make_app(tmp_path)
+    run_to_results(app, clock)
+    from history import load_sessions
+    assert load_sessions(app.history_path)[0]["mode"] == "SIM"
+
+
+def test_trend_returns_to_previous_screen(tmp_path):
+    app, clock = make_app(tmp_path)
+    drive(app, clock, ord("h"))
+    assert app.state == "trend"
+    drive(app, clock, KEY_SPACE)
+    assert app.state == "welcome"

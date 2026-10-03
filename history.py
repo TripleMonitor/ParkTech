@@ -1,6 +1,7 @@
 """Session history: sessions.csv, seeded DEMO DATA, trend chart (BGR image for OpenCV).
 
-Seeded rows have seeded=1 and are drawn hollow and labelled DEMO DATA on every chart.
+Seeded rows (seeded=1) and simulated sessions (mode=SIM) are not measurements: they are
+drawn hollow and labelled DEMO DATA / SIM on every chart.
 """
 from __future__ import annotations
 
@@ -15,13 +16,18 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions.csv")
-FIELDS = ["timestamp", "session_id", "seeded", "dose_hours", "neuroscore",
+FIELDS = ["timestamp", "session_id", "mode", "seeded", "dose_hours", "neuroscore",
           "tremor_R", "tremor_L", "tremor_R_cm", "tremor_L_cm", "tremor_R_hz", "tremor_L_hz",
           "tap_R", "tap_L", "tap_R_rate", "tap_L_rate", "tap_R_amp", "tap_L_amp",
           "flip_R", "flip_L", "flip_R_rate", "flip_L_rate", "flip_R_amp_deg", "flip_L_amp_deg",
           "coach_R_rate", "coach_L_rate",
           "asymmetry"]
 SCORE_KEYS = ("tremor", "tap", "flip")
+
+
+def not_measured(row: dict) -> bool:
+    """DEMO DATA (seeded) or SIM session: never draw these as real measurements."""
+    return row.get("seeded") == "1" or row.get("mode") == "SIM"
 
 
 def _fmt(v) -> str:
@@ -111,6 +117,7 @@ def seed_history(path: str = DEFAULT_PATH, days: int = 14, now: Optional[datetim
                      "L": (0.05 + 0.3 * off, 3.5 - 0.5 * off, 2.4 - 0.4 * off)}
             row = {"timestamp": day.replace(hour=hour).isoformat(timespec="seconds"),
                    "session_id": f"DEMO-{i:02d}{'am' if hour == 9 else 'pm'}", "seeded": 1,
+                   "mode": "DEMO",
                    "dose_hours": round(dose_h, 1)}
             scores = []
             for side, (cm, rate, flips) in sides.items():
@@ -153,7 +160,7 @@ def neuroscore_series(sessions: list[dict]) -> tuple[list, list, list]:
         if v is not None:
             xs.append(_when(r, i))
             ys.append(v)
-            sd.append(r.get("seeded") == "1")
+            sd.append(not_measured(r))
     return xs, ys, sd
 
 
@@ -194,18 +201,20 @@ def trend_image(sessions: list[dict], width: int = 1280, height: int = 720) -> n
     ax.set_title("NeuroScore over time (100 = no problems)", color="white", fontsize=11)
 
     ax = axes[0, 1]
-    pts = [(_num(r.get("dose_hours")), neuroscore_of_row(r), r.get("seeded") == "1") for r in sessions]
+    pts = [(_num(r.get("dose_hours")), neuroscore_of_row(r), not_measured(r)) for r in sessions]
     pts = [p for p in pts if p[0] is not None and p[1] is not None]
     for h, v, s in pts:
         ax.plot(h, v, "o", ms=6, mfc="none" if s else amber, mec=amber)
-    if len(pts) >= 3:
-        hh, vv = np.array([p[0] for p in pts]), np.array([p[1] for p in pts])
+    real = [p for p in pts if not p[2]]
+    fit_pts, fit_label = (real, "measured sessions") if len(real) >= 3 else (pts, "DEMO DATA / SIM")
+    if len(fit_pts) >= 3:
+        hh, vv = np.array([p[0] for p in fit_pts]), np.array([p[1] for p in fit_pts])
         if np.ptp(hh) > 0:
             m, b = np.polyfit(hh, vv, 1)
             gx = np.linspace(hh.min(), hh.max(), 10)
             ax.plot(gx, m * gx + b, "--", color=amber, lw=1)
-            ax.text(0.02, 0.06, f"fit: {m:+.1f} points per hour", transform=ax.transAxes,
-                    color=amber, fontsize=8)
+            ax.text(0.02, 0.06, f"fit ({fit_label}): {m:+.1f} points per hour",
+                    transform=ax.transAxes, color=amber, fontsize=8)
     ax.set_ylim(0, 105)
     ax.set_xlabel("hours since last levodopa dose", color="#bdbab4", fontsize=8)
     ax.set_title("NeuroScore vs dose timing", color="white", fontsize=11)
@@ -216,14 +225,21 @@ def trend_image(sessions: list[dict], width: int = 1280, height: int = 720) -> n
     for ax, side, colour in ((axes[1, 0], "R", red), (axes[1, 1], "L", blue)):
         for key, style, name in (("tremor", "o-", "tremor"), ("tap", "s-", "tapping"),
                                  ("flip", "^-", "flipping")):
-            p2 = [(_when(r, i), _num(r.get(f"{key}_{side}")), r.get("seeded") == "1")
+            p2 = [(_when(r, i), _num(r.get(f"{key}_{side}")), not_measured(r))
                   for i, r in enumerate(sessions)]
             p2 = [p for p in p2 if p[1] is not None]
             if p2:
                 ax.plot([p[0] for p in p2], [p[1] for p in p2], style[1], color=colour,
                         alpha=0.35 if key != "tremor" else 0.6, lw=1)
-                ax.plot([p[0] for p in p2], [p[1] for p in p2], style[0], ms=4, color=colour,
-                        mfc="none", label=name, alpha=0.9)
+                demo = [p for p in p2 if p[2]]
+                live = [p for p in p2 if not p[2]]
+                if demo:
+                    ax.plot([p[0] for p in demo], [p[1] for p in demo], style[0], ms=4,
+                            color=colour, mfc="none", alpha=0.9)
+                if live:
+                    ax.plot([p[0] for p in live], [p[1] for p in live], style[0], ms=5,
+                            color=colour, alpha=0.9)
+                ax.plot([], [], style[0], color=colour, label=name)
         ax.set_ylim(-0.3, 4.3)
         ax.set_yticks(range(5))
         if xlim:
@@ -241,9 +257,9 @@ def trend_image(sessions: list[dict], width: int = 1280, height: int = 720) -> n
     title = "NeuroCheck trend  (demo thresholds - tracking aid, not a diagnosis)"
     fig.suptitle(title, color="white", fontsize=13)
     if any_demo:
-        fig.text(0.99, 0.965, "hollow markers = DEMO DATA (seeded, not measured)", ha="right",
+        fig.text(0.5, 0.925, "hollow markers = DEMO DATA / SIM (not measured)", ha="center",
                  color=amber, fontsize=10, weight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.tight_layout(rect=(0, 0, 1, 0.91))
     fig.canvas.draw()
     rgba = np.asarray(fig.canvas.buffer_rgba())
     plt.close(fig)

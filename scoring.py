@@ -80,7 +80,7 @@ def score_tremor(f: TremorFeatures, expected_s: Optional[float] = None) -> Score
         score, label = 3, f"{c2:g}-{c3:g} cm (moderate)"
     else:
         score, label = 4, f">= {c3:g} cm (severe)"
-    reasons.append(f"Fingertip moves {d:.2f} cm: {label}")
+    reasons.append(f"Fingertip tremor amplitude {d:.2f} cm (half peak-to-peak): {label}")
     reasons.append(f"Tremor present in {f.window_pct:.0f}% of 1-second windows")
     return ScoreResult(score, reasons)
 

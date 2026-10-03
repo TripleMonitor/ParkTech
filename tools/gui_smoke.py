@@ -36,6 +36,7 @@ class Script:
         self.last_press = 0.0
         self.sessions_done = 0
         self.restarted_mid_test = False
+        self.coached = False
         self.log: list[str] = []
 
     def __call__(self, now: float) -> int:
@@ -45,6 +46,14 @@ class Script:
         key = -1
         if a.state == "boot":
             key = KEY_SPACE if a.boot.done and now - self.t0 > 1.0 else -1
+        elif a.state == "welcome" and not self.coached:
+            key = ord("c")                               # rhythm coach first (real window)
+        elif a.state == "coach":
+            if a.coach.phase == "ready":
+                key = KEY_SPACE
+            elif a.coach.phase == "done" and now - a.coach.t_phase > 1.5:
+                self.coached = True
+                key = KEY_SPACE
         elif a.state == "welcome":
             key = KEY_SPACE if self.sessions_done < 2 else ord("q")
         elif a.state == "ready":
@@ -58,7 +67,7 @@ class Script:
         elif a.state == "trend":
             if now - a.t_state > 1.5:
                 self.sessions_done += 1
-                key = KEY_SPACE
+                key = ord("r")                           # trend returns; R = new session
         elif a.state == "recording" and self.sessions_done == 1 and not self.restarted_mid_test \
                 and a.idx == 4 and now - a.t_state > 2:
             self.restarted_mid_test = True     # exercise R from the middle of a test
@@ -86,8 +95,13 @@ def main() -> int:
     seen: set[str] = set()
 
     def on_frame(a: App, canvas) -> None:
-        name = a.state if a.state in ("boot", "welcome", "results", "dashboard", "trend") else \
-            f"{a.state}_{a.test[0]}_{a.test[1]}"
+        if a.state == "coach":
+            name = f"coach_{a.coach.phase}"
+            if a.coach.phase == "cued" and a.clock() - a.coach.t_phase < 20:
+                return                           # wait for a well-filled coach graph
+        else:
+            name = a.state if a.state in ("boot", "welcome", "results", "dashboard", "trend") \
+                else f"{a.state}_{a.test[0]}_{a.test[1]}"
         if a.state == "recording" and a.clock() - a.t_state < 6:
             return                               # wait for a well-filled live chart
         if a.state == "boot" and not a.boot.done:
@@ -101,8 +115,8 @@ def main() -> int:
     elapsed = app.clock() - t0
     print("\n".join(script.log))
     print(f"\nran {elapsed:.1f}s, screens captured: {len(seen)}, caught exceptions: {errors}, "
-          f"R mid-test: {script.restarted_mid_test}")
-    ok = errors == 0 and elapsed >= MIN_SECONDS and script.restarted_mid_test
+          f"R mid-test: {script.restarted_mid_test}, coach run: {script.coached}")
+    ok = errors == 0 and elapsed >= MIN_SECONDS and script.restarted_mid_test and script.coached
     print("GUI SMOKE:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

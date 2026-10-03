@@ -1,0 +1,10 @@
+best: kp=0.01 ki=0.0 kd=0.0 probe_step=0.02  (cost 86.8)
+  nominal                        PASS  converge 0.0s, 0.0s, 0.0s  overshoot +6%  late std 4.1%  final 2.96/s (true 3.00)
+  20% missed beats               PASS  converge 0.0s, 0.0s, 0.0s  overshoot +6%  late std 2.9%  final 2.95/s (true 3.00)
+  5 s stop at 25 s               PASS  converge 0.0s, 0.0s, 0.0s  overshoot -2%  late std 1.6%  final 2.82/s (true 3.00)
+  noisy timing (60 ms)           PASS  converge 0.0s, 0.0s, 0.0s  overshoot +5%  late std 2.7%  final 3.04/s (true 3.00)
+  slow self-pacer (uncued 60%)   PASS  converge 16.8s, 16.8s, 16.8s  overshoot +6%  late std 1.6%  final 3.10/s (true 3.00)
+  fast self-pacer (uncued 95%)   PASS  converge 0.0s, 0.0s, 0.0s  overshoot +7%  late std 2.3%  final 3.07/s (true 3.00)
+  fatigue 15% + 20% missed       PASS  converge 0.0s, 0.0s, 0.0s  overshoot +8%  late std 0.9%  final 2.70/s (true 2.55)
+  cold start 1.5/s (info only)        converge 33.8s, 33.8s, 33.8s  overshoot -8%
+wrote docs/pid_tuning.png

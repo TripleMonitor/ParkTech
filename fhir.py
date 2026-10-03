@@ -61,8 +61,21 @@ def _observation(patient_ref: str, when: str, code: str, display: str, value: Op
     return obs
 
 
+SIM_TAG = {"system": "urn:neurocheck:tags", "code": "SIM",
+           "display": "SIMULATION - not measured"}
+
+
+def _mark_sim(resource: dict) -> dict:
+    resource.setdefault("meta", {})["tag"] = [SIM_TAG]
+    if resource.get("resourceType") == "Observation":
+        resource["status"] = "preliminary"
+        resource.setdefault("note", []).insert(0, {"text": "SIMULATION - not measured"})
+    return resource
+
+
 def build_bundle(snapshot: dict) -> dict:
-    """snapshot: plain dict from App.session_snapshot()."""
+    """snapshot: plain dict from App.session_snapshot(). Simulated sessions are tagged SIM,
+    status 'preliminary', with a note on every Observation."""
     patient_url = _uuid()
     when = snapshot["timestamp"]
     entries = [{"fullUrl": patient_url, "resource": {
@@ -91,7 +104,16 @@ def build_bundle(snapshot: dict) -> dict:
         entries.append({"fullUrl": _uuid(), "resource": _observation(
             patient_url, when, "hours-since-levodopa", "Hours since last levodopa dose (self-report)",
             snapshot["dose_hours"], ("h", "h"))})
-    return {"resourceType": "Bundle", "type": "collection", "timestamp": when, "entry": entries}
+    bundle = {"resourceType": "Bundle", "type": "collection", "timestamp": when, "entry": entries}
+    if snapshot.get("mode", "LIVE") != "LIVE":
+        bundle["meta"] = {"tag": [SIM_TAG]}
+        for e in entries:
+            _mark_sim(e["resource"])
+    return bundle
+
+
+def _has_timezone(s: str) -> bool:
+    return isinstance(s, str) and "T" in s and (s.endswith("Z") or s[-6] in "+-")
 
 
 def save_bundle(snapshot: dict, path: str) -> str:
@@ -105,6 +127,8 @@ def validate_bundle(b: dict) -> list[str]:
     errs = []
     if b.get("resourceType") != "Bundle" or b.get("type") != "collection":
         errs.append("not a collection Bundle")
+    if not _has_timezone(b.get("timestamp", "")):
+        errs.append("Bundle.timestamp must be an instant with a timezone")
     urls = set()
     for i, e in enumerate(b.get("entry", [])):
         url, r = e.get("fullUrl", ""), e.get("resource", {})
@@ -113,8 +137,10 @@ def validate_bundle(b: dict) -> list[str]:
         urls.add(url)
         rt = r.get("resourceType")
         if rt == "Observation":
-            if r.get("status") != "final":
+            if r.get("status") not in ("final", "preliminary"):
                 errs.append(f"entry {i}: status")
+            if not _has_timezone(r.get("effectiveDateTime", "")):
+                errs.append(f"entry {i}: effectiveDateTime needs a timezone")
             cod = r.get("code", {}).get("coding", [{}])[0]
             if cod.get("system") != LOCAL_SYSTEM or not cod.get("code") or not cod.get("display"):
                 errs.append(f"entry {i}: code must be a local code with display")

@@ -2,9 +2,11 @@
 
 All three numbers are measured from the recording itself:
   detected   fraction of frames where MediaPipe found a hand
-  confidence mean MediaPipe hand score over detected frames
+  confidence mean MediaPipe HANDEDNESS score over detected frames (the only per-frame
+             score the Hands solution exposes; shown for information, it is NOT a
+             tracking confidence and does not trigger LOW CONFIDENCE)
   dropped    frames lost: failed camera reads + timing gaps > 2x the median frame interval
-A result is "low confidence" if any of them is out of range (demo thresholds).
+A result is "low confidence" if detection or dropped frames are out of range (demo thresholds).
 """
 from __future__ import annotations
 
@@ -32,8 +34,6 @@ class SignalQuality:
         out = []
         if self.detected < MIN_DETECTED:
             out.append(f"hand found in {self.detected:.0%} of frames (< {MIN_DETECTED:.0%})")
-        if self.confidence is not None and self.confidence < MIN_CONFIDENCE:
-            out.append(f"tracking confidence {self.confidence:.2f} (< {MIN_CONFIDENCE:.2f})")
         if self.dropped > MAX_DROPPED:
             out.append(f"{self.dropped:.0%} frames dropped (> {MAX_DROPPED:.0%})")
         return out

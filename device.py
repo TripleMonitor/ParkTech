@@ -113,21 +113,28 @@ def find_arduino_port() -> Optional[str]:
 class ClockMapper:
     """Maps Arduino millis onto the PC clock.
 
-    offset = min over reports of (pc_receive_time - arduino_time): the report with
-    the least USB latency gives the best estimate, so intervals keep the Arduino's
-    millisecond precision while lining up with the PC's recording window.
+    offset = min over RECENT reports (last WINDOW_S seconds) of (pc_receive_time -
+    arduino_time): the report with the least USB latency gives the best estimate, so
+    intervals keep the Arduino's millisecond precision while lining up with the PC's
+    recording window. The sliding window (plus a reset at every START) tracks a slow
+    or fast Arduino resonator instead of drifting away from it.
     """
+
+    WINDOW_S = 20.0
 
     def __init__(self) -> None:
         self.offset: Optional[float] = None
+        self._obs: deque = deque()
 
     def reset(self) -> None:
         self.offset = None
+        self._obs.clear()
 
     def observe(self, t_ms: float, received: float) -> None:
-        cand = received - t_ms / 1000.0
-        if self.offset is None or cand < self.offset:
-            self.offset = cand
+        self._obs.append((received, received - t_ms / 1000.0))
+        while self._obs and received - self._obs[0][0] > self.WINDOW_S:
+            self._obs.popleft()
+        self.offset = min(c for _, c in self._obs)
 
     def to_pc(self, t_ms: float, received: Optional[float] = None) -> float:
         if received is not None:
@@ -160,6 +167,9 @@ class ArduinoDevice:
         self.status = "Looking for Arduino..."
         self.warning = ""
         self.state: Optional[int] = None
+        self.state_at = -1e9                 # PC time of the last switch report
+        self._cue_ms: Optional[int] = None   # metronome interval while the cue is on
+        self._rx_buf = b""
         self.sim = False
         self.ready_received = False
         self._rx_times: deque = deque(maxlen=2000)
@@ -237,6 +247,8 @@ class ArduinoDevice:
                 self._enqueue(cmd)
         if self._streaming_wanted:
             self._enqueue("START")
+        if self._cue_ms is not None:
+            self._enqueue(f"CUE,ON,{self._cue_ms}")
         self._enqueue("STATE")
 
     def _read_until_error(self) -> None:
@@ -250,12 +262,17 @@ class ArduinoDevice:
                 log.error("Serial read failed: %s", exc)
                 return
             received = self._clock()
+            if not raw:
+                continue
             if not raw.endswith(b"\n"):
-                continue        # empty (timeout) or partial line: never half-parse
+                self._rx_buf = (self._rx_buf + raw)[-256:]   # timed out mid-line: keep it
+                continue
+            raw, self._rx_buf = self._rx_buf + raw, b""
             self._rx_times.append(received)
             rep = parse_line(raw)
             if rep is not None:
                 self.state = rep.state
+                self.state_at = received
                 self._ping.set()
                 self._mapper.observe(rep.t_ms, received)
                 if self._events.qsize() < MAX_BUFFER:
@@ -275,6 +292,8 @@ class ArduinoDevice:
 
     def _close_port(self) -> None:
         self.connected = False
+        self.state = None                    # no stale tilt value while disconnected
+        self._rx_buf = b""
         with self._ser_lock:
             ser, self._ser = self._ser, None
         if ser is not None:
@@ -337,9 +356,16 @@ class ArduinoDevice:
     # --- shared interface -------------------------------------------------------
     def start(self) -> None:
         self.drain()
+        self._mapper.reset()         # fresh clock offset for every recording
         self._streaming_wanted = True
         self._send("START")
         self._send("STATE")          # reference state at t=0 of the recording
+
+    @property
+    def state_fresh(self) -> bool:
+        """Tilt state is trustworthy: streaming (changes reported) or a recent report."""
+        return self.state is not None and (self._streaming_wanted or
+                                           self._clock() - self.state_at < 0.6)
 
     def stop(self) -> None:
         self._streaming_wanted = False
@@ -369,12 +395,16 @@ class ArduinoDevice:
                 return out
 
     def cue_on(self, interval_ms: float) -> None:
-        self._send(f"CUE,ON,{clamp_interval(interval_ms)}")
+        self._cue_ms = clamp_interval(interval_ms)
+        self._send(f"CUE,ON,{self._cue_ms}")
 
     def cue_off(self) -> None:
+        self._cue_ms = None
         self._send("CUE,OFF")
 
     def tempo(self, interval_ms: float) -> None:
+        if self._cue_ms is not None:
+            self._cue_ms = clamp_interval(interval_ms)
         self._send(f"TEMPO,{clamp_interval(interval_ms)}")
 
     def beep(self, n: int = 1) -> None:
@@ -390,6 +420,7 @@ class ArduinoDevice:
         self._send(self._last_lcd)
 
     def close(self) -> None:
+        self.cue_off()                         # never leave the metronome clicking
         self.stop()
         deadline = time.monotonic() + 0.5     # give STOP / LED,OFF a moment to go out
         while not self._writes.empty() and self._ser is not None and time.monotonic() < deadline:
@@ -420,6 +451,7 @@ class MockDevice:
     warning = ""
     sim = True
     ready_received = True
+    state_fresh = True
 
     def __init__(self, seed: Optional[int] = None, clock: Callable[[], float] = time.perf_counter,
                  profiles: Optional[dict] = None, test_seconds: float = 10.0):

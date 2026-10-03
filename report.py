@@ -20,6 +20,9 @@ def save_pdf(snapshot: dict, sessions: list[dict], path: str) -> str:
 
     fig = plt.figure(figsize=(8.27, 11.69))            # A4 portrait
     fig.text(0.06, 0.965, "NeuroCheck - motor check summary", fontsize=16, weight="bold")
+    if snapshot.get("mode", "LIVE") != "LIVE":
+        fig.text(0.70, 0.965, "SIMULATION - NOT MEASURED", fontsize=12, weight="bold",
+                 color="#b00020")
     dose = snapshot.get("dose_hours")
     fig.text(0.06, 0.945, f"Session {snapshot['session_id']}   {snapshot['timestamp']}   "
              f"hours since levodopa: {'unknown' if dose is None else f'{dose:g}'}   "
@@ -37,7 +40,11 @@ def save_pdf(snapshot: dict, sessions: list[dict], path: str) -> str:
         fig.text(0.38, y, f"score {s}", fontsize=9, weight="bold",
                  color="#b00020" if (t["score"] or 0) >= 3 else "#000000")
         y -= 0.014
-        for r in t["reasons"][:4]:
+        flags = [r for r in t["reasons"] if r.startswith("LOW CONFIDENCE")]
+        for r in flags:                      # never dropped by the 4-line limit below
+            fig.text(0.08, y, r[:110], fontsize=7, weight="bold", color="#a05a00")
+            y -= 0.0115
+        for r in [r for r in t["reasons"] if not r.startswith("LOW CONFIDENCE")][:4]:
             for line in textwrap.wrap(r, 95)[:2]:
                 fig.text(0.08, y, "- " + line, fontsize=7)
                 y -= 0.0115
@@ -60,8 +67,8 @@ def save_pdf(snapshot: dict, sessions: list[dict], path: str) -> str:
     for x, v, sd in zip(xs, ys, seeded):
         ax_t.plot(x, v, "o", mfc="none" if sd else "#0a6a7a", mec="#0a6a7a", ms=4)
     if any(seeded):
-        ax_t.text(0.02, 0.04, "hollow = DEMO DATA (seeded)", transform=ax_t.transAxes, fontsize=7,
-                  color="#a05a00")
+        ax_t.text(0.02, 0.04, "hollow = DEMO DATA / SIM (not measured)", transform=ax_t.transAxes,
+                  fontsize=7, color="#a05a00")
     ax_t.set_ylim(0, 100)
     ax_t.set_title("NeuroScore over time", fontsize=9)
     ax_t.tick_params(labelsize=6)

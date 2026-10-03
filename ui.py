@@ -213,7 +213,8 @@ def flip_timeline(canvas, flip_times: Sequence[float], seconds: float, now_s: Op
 
 
 def spectrum_image(freqs: np.ndarray, power: np.ndarray, peak_hz: float, disp_cm: float,
-                   score: Optional[int], width: int, height: int) -> np.ndarray:
+                   score: Optional[int], width: int, height: int,
+                   clear_peak: bool = True) -> np.ndarray:
     """Matplotlib spectrum: 4-6 Hz band shaded, 3-8 Hz band edges, peak marked. BGR image."""
     import matplotlib
     matplotlib.use("Agg")
@@ -232,8 +233,10 @@ def spectrum_image(freqs: np.ndarray, power: np.ndarray, peak_hz: float, disp_cm
             ax.axvline(edge, color="#aaaaaa", ls="--", lw=1)
         pk = np.sqrt(np.interp(peak_hz, freqs, power))
         ax.plot([peak_hz], [pk], "o", color="#ff4d4d", ms=10)
-        ax.annotate(f"{peak_hz:.1f} Hz  {disp_cm:.2f} cm", (peak_hz, pk), xytext=(10, -4),
-                    textcoords="offset points", color="white", fontsize=13, va="top")
+        label = f"{peak_hz:.1f} Hz  {disp_cm:.2f} cm" if clear_peak else "no clear tremor peak"
+        ax.annotate(label, (peak_hz, pk), xytext=(10, -4),
+                    textcoords="offset points", color="white" if clear_peak else "#aaaaaa",
+                    fontsize=13, va="top")
         ax.set_ylim(0, max(pk, float(amp.max())) * 1.25 + 1e-9)
     ax.set_xlim(0, 15)
     ax.set_xlabel("frequency (Hz)   dashed = 3-8 Hz tremor band", color="#cccccc")

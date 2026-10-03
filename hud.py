@@ -57,14 +57,15 @@ def telemetry(c, hands, device, sim_hand: bool, sim_dev: bool) -> None:
     cv2.line(c, (0, y0), (ui.W, y0), ui.BORDER, 1)
     tel = getattr(hands, "telemetry", None)
     fps = tel.fps if tel else None
-    inf = tel.inference_ms if tel else None
+    inf = tel.inference_ms if (tel and fps is not None) else None   # only while the camera runs
     link = ("SIM" if sim_dev else ("UP" if device.connected else "DOWN"))
     items = [
         ("CAM", f"{_fmt(fps, '5.1f')} fps" + (" SIM" if sim_hand else ""), ui.WARN if sim_hand else ui.WHITE),
         ("INFER", "SIM" if sim_hand else f"{_fmt(inf, '5.1f')} ms", ui.WARN if sim_hand else ui.WHITE),
         ("SERIAL", f"{link} {device.packets_per_sec:4.0f} pkt/s",
          ui.WARN if sim_dev else (ui.OK if device.connected else ui.REC)),
-        ("TILT", "-" if device.state is None else str(device.state) + (" SIM" if sim_dev else ""),
+        ("TILT", ("?" if device.state is None or not getattr(device, "state_fresh", True)
+                  else str(device.state)) + (" SIM" if sim_dev else ""),
          ui.WARN if sim_dev else ui.WHITE),
         ("MODE", "SIMULATION" if (sim_hand or sim_dev) else "LIVE",
          ui.WARN if (sim_hand or sim_dev) else ui.OK),
@@ -114,8 +115,8 @@ def quality_meter(c, q: Optional[SignalQuality], x: int, y: int, w: int, sim: bo
         ui.text(c, "waiting for frames...", (x + 12, y + 60), 0.5, ui.DIM)
         return
     rows = [("HAND FOUND", q.detected, f"{q.detected:4.0%}", q.detected >= MIN_DETECTED),
-            ("CONFIDENCE", q.confidence or 0.0, "--" if q.confidence is None else f"{q.confidence:.2f}",
-             q.confidence is None or q.confidence >= MIN_CONFIDENCE),
+            ("HANDEDNESS", q.confidence or 0.0, "--" if q.confidence is None else f"{q.confidence:.2f}",
+             True),                                   # info only (see quality.py)
             ("DROPPED", min(1.0, q.dropped / max(MAX_DROPPED * 2, 1e-9)),
              f"{q.dropped_frames} ({q.dropped:.0%})", q.dropped <= MAX_DROPPED)]
     for i, (label, frac, value, good) in enumerate(rows):
