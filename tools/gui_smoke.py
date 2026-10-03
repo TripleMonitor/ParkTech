@@ -52,7 +52,9 @@ class Script:
         elif a.state == "done":
             key = KEY_SPACE
         elif a.state == "results":
-            key = ord("h") if now - a.t_state > 1.5 else -1
+            key = KEY_SPACE if now - a.t_state > 1.5 else -1
+        elif a.state == "dashboard":
+            key = KEY_SPACE if now - a.t_state > 1.5 else -1
         elif a.state == "trend":
             if now - a.t_state > 1.5:
                 self.sessions_done += 1
@@ -84,7 +86,7 @@ def main() -> int:
     seen: set[str] = set()
 
     def on_frame(a: App, canvas) -> None:
-        name = a.state if a.state in ("boot", "welcome", "results", "trend") else \
+        name = a.state if a.state in ("boot", "welcome", "results", "dashboard", "trend") else \
             f"{a.state}_{a.test[0]}_{a.test[1]}"
         if a.state == "recording" and a.clock() - a.t_state < 6:
             return                               # wait for a well-filled live chart

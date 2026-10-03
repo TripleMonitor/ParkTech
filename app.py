@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import time
+from datetime import datetime
 import traceback
 from dataclasses import dataclass
 from typing import Optional
@@ -28,6 +30,7 @@ import hud
 import ui
 from boot import BootChecks
 from coach_session import CoachSession
+from dashboard import neuroscore, radar_image
 from quality import SignalQuality, signal_quality
 from flipping_analysis import FlippingFeatures, analyze_flipping, debounce
 from fusion import FusionResult, current_angle, fuse, palm_normal
@@ -140,6 +143,11 @@ class App:
         self.coach: Optional[CoachSession] = None
         self.coach_results: dict = {}
         self.coach_return = "welcome"
+        self.dose_text = ""
+        self.dose_unknown = False
+        self.radar_img: Optional[np.ndarray] = None
+        self.export_msg = ""
+        self.started_at = datetime.now().isoformat(timespec="seconds")
         self.last_beep = 0
         self.device.led("OFF")
         self.device.lcd("NeuroCheck", "Press SPACE")
@@ -299,6 +307,86 @@ class App:
             log.error("Could not save session: %s", exc)
             self.save_msg = f"NOT saved: {exc.strerror} (is {self.history_path} open in Excel?)"
 
+    @property
+    def dose_hours(self) -> Optional[float]:
+        if self.dose_unknown or not self.dose_text:
+            return None
+        try:
+            return float(self.dose_text)
+        except ValueError:
+            return None
+
+    def _dose_key(self, ch: str, key: int) -> None:
+        if key == 8:
+            self.dose_text = self.dose_text[:-1]
+        elif ch == "n":
+            self.dose_unknown, self.dose_text = True, ""
+            return
+        elif len(self.dose_text) < 4 and not (ch == "." and "." in self.dose_text):
+            self.dose_text += ch
+        self.dose_unknown = False
+
+    def _scores(self) -> dict:
+        return {(k, h): (self.results[(k, h)].result.score if (k, h) in self.results else None)
+                for k, h in TESTS}
+
+    def _neuroscore(self):
+        return neuroscore(self._scores())
+
+    def session_snapshot(self) -> dict:
+        """Plain, JSON-able summary of this session (used by the PDF and FHIR exports)."""
+        tests = []
+        for (kind, hand), tr in self.results.items():
+            f = tr.features
+            feats = {}
+            if isinstance(f, TremorFeatures) and f.valid:
+                feats = {"peak_hz": f.peak_hz, "displacement_cm": effective_displacement_cm(f)}
+            elif isinstance(f, TappingFeatures) and tr.result.score is not None:
+                feats = {"taps_per_sec": f.taps_per_sec, "mean_amplitude": f.mean_amplitude,
+                         "decrement": f.decrement}
+            elif isinstance(f, FlippingFeatures) and tr.result.score is not None:
+                feats = {"flips_per_sec": f.flips_per_sec, "interval_cv": f.interval_cv}
+                if tr.fusion is not None and tr.fusion.camera_ok:
+                    feats["median_amplitude_deg"] = tr.fusion.median_amplitude_deg
+            tests.append({"kind": kind, "hand": hand, "score": tr.result.score,
+                          "reasons": list(tr.result.reasons), "features": feats})
+        ns, formula = self._neuroscore()
+        return {"session_id": self.session_id, "timestamp": self.started_at,
+                "mode": "LIVE" if not (self.sim_hand or self.sim_dev) else "SIMULATION",
+                "dose_hours": self.dose_hours, "neuroscore": ns, "neuroscore_formula": formula,
+                "asymmetry": list(self.flags), "tests": tests,
+                "coach_rates": {h: s.max_sustainable_rate for h, s in self.coach_results.items()}}
+
+    def _export_dir(self) -> str:
+        d = os.path.join(os.path.dirname(os.path.abspath(self.history_path)), "exports")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _export(self, what: str) -> None:
+        try:
+            snap = self.session_snapshot()
+            base = os.path.join(self._export_dir(), self.session_id)
+            if what == "pdf":
+                from report import save_pdf
+                path = save_pdf(snap, history.load_sessions(self.history_path), base + ".pdf")
+            else:
+                from fhir import save_bundle
+                path = save_bundle(snap, base + "_fhir.json")
+            self.export_msg = f"Saved exports/{os.path.basename(path)}"
+            log.info(self.export_msg)
+        except Exception as exc:          # an export must never take the demo down
+            log.exception("export failed")
+            self.export_msg = f"Export failed: {exc}"
+
+    def _enter_dashboard(self, now: float) -> None:
+        self._goto("dashboard", now)
+        try:
+            self.radar_img = radar_image(self._scores(), {h: s.max_sustainable_rate for h, s
+                                                          in self.coach_results.items()}, 600, 520)
+        except Exception:
+            log.exception("radar render failed")
+            self.radar_img = None
+
     def _save_coach_row(self, hand: str, summary) -> None:
         try:
             history.save_session({"session_id": self.session_id,
@@ -334,7 +422,8 @@ class App:
         return flags
 
     def _session_row(self) -> dict:
-        row: dict = {"asymmetry": " ; ".join(self.flags), "session_id": self.session_id}
+        row: dict = {"asymmetry": " ; ".join(self.flags), "session_id": self.session_id,
+                     "dose_hours": self.dose_hours, "neuroscore": self._neuroscore()[0]}
         for hand, s in self.coach_results.items():
             row[f"coach_{hand[0]}_rate"] = s.max_sustainable_rate
         for (kind, hand), tr in self.results.items():
@@ -368,10 +457,16 @@ class App:
             self.restart(now)
         elif ch == "t" and hasattr(self.hands, "tremor_enabled"):
             self.hands.tremor_enabled = not self.hands.tremor_enabled
-        elif ch == "f" and hasattr(self.device, "flipping"):
+        elif ch == "f" and hasattr(self.device, "flipping") and self.state not in ("results", "dashboard"):
             self.device.flipping = not self.device.flipping
         elif ch == "h" and self.state in ("welcome", "results"):
             self._enter_trend(now)
+        elif self.state == "welcome" and (ch.isdigit() or ch == "." or key == 8 or ch == "n"):
+            self._dose_key(ch, key)
+        elif ch == "p" and self.state in ("results", "dashboard"):
+            self._export("pdf")
+        elif ch == "f" and self.state in ("results", "dashboard"):
+            self._export("fhir")
         elif ch == "c" and self.state in ("welcome", "results"):
             self.coach_return = self.state
             self.coach = CoachSession(self.device, "Right", self.clock)
@@ -405,6 +500,8 @@ class App:
             else:
                 self._enter_results(now)
         elif self.state == "results":
+            self._enter_dashboard(now)
+        elif self.state == "dashboard":
             self._enter_trend(now)
         elif self.state == "trend":
             self.restart(now)
@@ -520,6 +617,8 @@ class App:
     def _hints(self) -> str:
         if self.state == "boot":
             return "SPACE continue (when done)   Q quit"
+        if self.state in ("results", "dashboard"):
+            return "SPACE next  P pdf  F fhir  C coach  R restart  H trend  Q quit"
         hints = "SPACE next  C coach  R restart  H trend  Q quit"
         sim = [k for k, ok in (("T tremor", hasattr(self.hands, "tremor_enabled")),
                                ("F stuck sensor", hasattr(self.device, "flipping"))) if ok]
@@ -613,12 +712,15 @@ class App:
         ui.centred(c, "MOTOR CHECK PROTOCOL", 165, 1.1, ui.ACCENT, 2)
         ui.centred(c, "3 tests x 2 hands, scored 0-4 with every rule shown", 198, 0.45, ui.GREY)
         for i, (kind, hand) in enumerate(TESTS):
-            y = 255 + i * 40
+            y = 245 + i * 38
             ui.text(c, f"{i + 1:02d}", (360, y), 0.65, ui.ACCENT, 2)
             ui.text(c, f"{hand.upper():<6} {TITLES[kind]}", (420, y), 0.65, ui.WHITE)
             ui.text(c, f"{self.seconds:4.0f} s", (850, y), 0.65, ui.GREY)
-        ui.centred(c, "PRESS SPACE TO BEGIN", 545, 0.9, ui.ACCENT, 2)
-        ui.centred(c, "H: history trend", 582, 0.5, ui.GREY)
+        dose = "unknown" if self.dose_unknown else (self.dose_text or "_")
+        ui.centred(c, f"Hours since last levodopa dose?  [ {dose} ]", 510, 0.6, ui.WHITE)
+        ui.centred(c, "type a number (e.g. 2.5), N = unknown, Backspace = edit", 532, 0.4, ui.DIM)
+        ui.centred(c, "PRESS SPACE TO BEGIN", 568, 0.85, ui.ACCENT, 2)
+        ui.centred(c, "H: history trend    C: rhythm coach", 596, 0.45, ui.GREY)
 
     def _test_title(self, c) -> None:
         kind, hand = self.test
@@ -795,6 +897,9 @@ class App:
             ui.score_card(c, 20 + col * 625, 112 + row * 166, 615, 158,
                           f"{hand} - {TITLES[kind]}", res.score, res.reasons, compact=True,
                           flag="LOW CONFIDENCE" if tr and tr.low_confidence else "")
+        if self.export_msg:
+            ui.text(c, self.export_msg[-90:], (620, 98), 0.42,
+                    ui.REC if self.export_msg.startswith("Export failed") else ui.OK)
         y = 628
         if self.flags:
             ui.text(c, "ASYMMETRY", (20, y + 14), 0.65, ui.WARN, 2)
@@ -802,6 +907,35 @@ class App:
                 ui.text(c, part, (165, y + 12 + j * 20), 0.46, ui.WARN)
         else:
             ui.text(c, "No left/right asymmetry flagged", (20, y + 14), 0.6, ui.GREY)
+
+    def _draw_dashboard(self, c, now) -> None:
+        ui.text(c, "RESULTS DASHBOARD", (20, 100), 0.9, ui.ACCENT, 2)
+        if self.radar_img is not None:
+            ui.paste(c, self.radar_img, 20, 115, 600, 520)
+        ns, formula = self._neuroscore()
+        ui.panel(c, 640, 115, 620, 250)
+        ui.text(c, "NEUROSCORE", (665, 150), 0.6, ui.ACCENT, 2)
+        col = ui.DIM if ns is None else (ui.OK if ns >= 75 else ui.WARN if ns >= 50 else ui.REC)
+        ui.text(c, "--" if ns is None else f"{ns:.0f}", (665, 255), 3.2, col, 4)
+        ui.text(c, "/ 100", (665 + ui.text_width("100", 3.2, 4) + 14, 255), 0.7, ui.GREY)
+        for i, line in enumerate(ui.wrap(formula, 580, 0.42)[:3]):
+            ui.text(c, line, (665, 295 + i * 20), 0.42, ui.WHITE)
+        ui.text(c, "composite tracking index, not a diagnosis", (665, 352), 0.42, ui.WARN, 2)
+        ui.panel(c, 640, 380, 620, 255)
+        dose = self.dose_hours
+        rows = [("Hours since levodopa", "unknown" if dose is None else f"{dose:g} h"),
+                ("Asymmetry flags", str(len(self.flags))),
+                ("Low-confidence results", str(sum(r.low_confidence for r in self.results.values()))),
+                ("Rhythm coach", ", ".join(f"{h[0]} {s.max_sustainable_rate:.2f}/s"
+                                           for h, s in self.coach_results.items()) or "not run (C)"),
+                ("Mode", "SIMULATION - SIM data" if (self.sim_hand or self.sim_dev) else "LIVE")]
+        for i, (k, v) in enumerate(rows):
+            ui.text(c, k, (665, 418 + i * 34), 0.48, ui.GREY)
+            ui.text(c, v, (930, 418 + i * 34), 0.5, ui.WHITE)
+        ui.text(c, "P: doctor PDF   F: FHIR JSON   SPACE: trend", (665, 612), 0.48, ui.ACCENT, 2)
+        if self.export_msg:
+            ui.text(c, self.export_msg[-70:], (20, 655), 0.42,
+                    ui.REC if self.export_msg.startswith("Export failed") else ui.OK)
 
     def _draw_trend(self) -> np.ndarray:
         c = ui.blank()
@@ -909,7 +1043,7 @@ def main(argv=None) -> None:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if args.seed_history:
-        history.seed_history(args.history)
+        history.seed_history(args.history)          # 14 days x 2 sessions of DEMO DATA
     device, hands = build(args)
     warm_up_matplotlib()
     boot = None if args.no_boot else BootChecks(device, hands).start()

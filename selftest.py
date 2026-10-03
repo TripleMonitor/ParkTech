@@ -53,6 +53,8 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
     snap("00_boot", tick())
     tick(KEY_SPACE)                                   # boot -> welcome
     snap("01_welcome", tick())
+    for k in (ord("2"), ord("."), ord("5")):          # hours since levodopa = 2.5
+        tick(k)
     tick(KEY_SPACE)                                   # welcome -> ready (test 1)
     for i, (kind, hand) in enumerate(TESTS):
         if app.state != "ready":
@@ -85,6 +87,10 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
     snap("10_coach_done", tick())
     tick(KEY_SPACE)                                   # back to results
     results_img = tick()
+    tick(ord("p"))                                    # doctor PDF
+    tick(ord("f"))                                    # FHIR JSON
+    snap("11_dashboard", tick(KEY_SPACE))             # results -> dashboard
+    tick()
     trend_img = tick(KEY_SPACE)                       # results -> trend
     snap("07_trend", trend_img)
     if screens_dir:
@@ -92,6 +98,22 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
         for name, img in shots.items():
             cv2.imwrite(os.path.join(screens_dir, f"selftest_{name}.png"), img)
     return app, dev, results_img, trend_img
+
+
+def _exports_ok(app: App, history_path: str) -> bool:
+    import json
+
+    from fhir import validate_bundle
+    d = os.path.join(os.path.dirname(history_path), "exports")
+    pdf = os.path.join(d, f"{app.session_id}.pdf")
+    fj = os.path.join(d, f"{app.session_id}_fhir.json")
+    if not (os.path.exists(pdf) and os.path.exists(fj)):
+        return False
+    with open(pdf, "rb") as f:
+        if not f.read(4) == b"%PDF":
+            return False
+    with open(fj, encoding="utf-8") as f:
+        return validate_bundle(json.load(f)) == []
 
 
 def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[str, bool, str]]:
@@ -145,6 +167,11 @@ def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[st
          "" if "Right" not in app.coach_results else
          f"{app.coach_results['Right'].max_sustainable_rate:.2f} beats/s, "
          f"{app.coach_results['Right'].beats} beats"),
+        ("NeuroScore + dose saved", rows[0]["neuroscore"] != "" and float(rows[0]["dose_hours"] or 0) == 2.5,
+         f"NeuroScore {rows[0]['neuroscore']}, dose {rows[0]['dose_hours']} h"),
+        ("Exports: PDF + valid FHIR bundle", _exports_ok(app, history_path),
+         ", ".join(sorted(os.listdir(os.path.join(os.path.dirname(history_path), "exports"))))
+         if os.path.isdir(os.path.join(os.path.dirname(history_path), "exports")) else "none"),
         ("Signal quality measured on camera tests",
          all(res[(k, h)].quality is not None and res[(k, h)].quality.frames > 250
              for k in ("tremor", "tapping") for h in ("Right", "Left")),
