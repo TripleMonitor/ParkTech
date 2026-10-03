@@ -1,68 +1,121 @@
+"""Scoring tests. Signals are synthetic with known answers (see test_*_analysis too)."""
 from dataclasses import replace
 
-from scoring import (ScoreResult, TappingFeatures, TremorFeatures, score_tapping,
-                     score_tremor, tapping_asymmetry, tremor_asymmetry,
-                     tremor_displacement_cm)
+import numpy as np
+import pytest
+
+from scoring import (ScoreResult, asymmetry, score_tapping, score_tremor, tapping_asymmetry,
+                     tremor_asymmetry)
+from tapping_analysis import TappingFeatures, analyze_tapping
+from tests.test_tapping_analysis import taps
+from tests.test_tremor_analysis import signal
+from tremor_analysis import analyze_tremor
 
 
-def tremor(peak_hz=5.0, disp=0.5, clear=True):
-    return TremorFeatures(peak_hz=peak_hz, peak_accel=0.0, displacement_cm=disp,
-                          has_clear_peak=clear, duration_s=10)
+# --- tremor: synthetic signal -> analysis -> score -----------------------------------
+@pytest.mark.parametrize("accel,score", [(4.93, 1), (19.7, 2), (49.0, 3)])
+def test_tremor_scores_from_sine(accel, score):
+    r = score_tremor(analyze_tremor(*signal(accel=accel)))
+    assert r.score == score
+    assert any("5.0 Hz in Parkinson's range" in s for s in r.reasons)
 
 
-NORMAL_TAP = TappingFeatures(n_taps=40, taps_per_sec=4.0, mean_amplitude=0.9,
-                             decrement=0.05, interval_cv=0.1, hesitations=0,
-                             hand_visible=1.0, duration_s=10)
+def test_tremor_score_4_from_large_sine():
+    assert score_tremor(analyze_tremor(*signal(accel=110.0))).score == 4
 
 
-def test_displacement_formula():
-    # 1 cm at 5 Hz needs a = 0.01 * (2*pi*5)^2 ~= 9.87 m/s^2
-    assert abs(tremor_displacement_cm(9.8696, 5.0) - 1.0) < 1e-3
+def test_tremor_noise_only_scores_zero_with_reason():
+    r = score_tremor(analyze_tremor(*signal(accel=0.0)))
+    assert r.score == 0
+    assert "no clear tremor" in r.reasons[0].lower()
 
 
-def test_tremor_no_peak_scores_zero():
-    assert score_tremor(tremor(clear=False)).score == 0
+def test_tremor_slow_1hz_scores_zero():
+    assert score_tremor(analyze_tremor(*signal(freq=1.0, accel=3.0))).score == 0
 
 
-def test_tremor_amplitude_bands():
-    assert [score_tremor(tremor(disp=d)).score for d in (0.05, 0.5, 2, 5, 12)] == [0, 1, 2, 3, 4]
+def test_tremor_outside_pd_range_says_so():
+    r = score_tremor(analyze_tremor(*signal(freq=7.0, accel=30.0)))
+    assert r.score >= 1 and "outside Parkinson's range" in r.reasons[0]
 
 
-def test_tremor_reason_mentions_pd_range():
-    reasons = score_tremor(tremor(peak_hz=5.2)).reasons
-    assert any("Parkinson's range" in r and "5.2 Hz" in r for r in reasons)
+def test_tremor_invalid_data_is_unscored():
+    r = score_tremor(analyze_tremor(*signal(seconds=1.0)))
+    assert r.score is None and r.reasons
 
 
-def test_tapping_normal_is_zero():
-    assert score_tapping(NORMAL_TAP).score == 0
+# --- tapping ----------------------------------------------------------------------------
+def test_tapping_steady_3hz_scores_zero():
+    r = score_tapping(analyze_tapping(*taps()))
+    assert r.score == 0
 
 
-def test_tapping_problem_counts():
-    one = replace(NORMAL_TAP, interval_cv=0.4)
-    two = replace(one, decrement=0.4)
-    many = replace(two, mean_amplitude=0.3, taps_per_sec=1.5)
-    assert score_tapping(one).score == 1
-    assert score_tapping(two).score == 2
-    assert score_tapping(many).score == 3
-    assert len(score_tapping(many).reasons) == 4
+def test_tapping_shrinking_flags_decrement():
+    r = score_tapping(analyze_tapping(*taps(shrink=0.5)))
+    assert r.score >= 1 and any("shrink" in s for s in r.reasons)
 
 
-def test_tapping_barely_able():
-    assert score_tapping(replace(NORMAL_TAP, n_taps=2)).score == 4
+def test_tapping_two_pauses_scores_at_least_2():
+    r = score_tapping(analyze_tapping(*taps(pauses=(3.0, 6.5))))
+    assert r.score >= 2 and any("hesitation" in s for s in r.reasons)
+
+
+def test_tapping_flat_scores_4():
+    f = analyze_tapping([i / 30 for i in range(300)], [0.2] * 300)
+    assert score_tapping(f).score == 4
+
+
+def test_tapping_problem_count_caps_at_3():
+    f = TappingFeatures(20, 1.5, 0.3, 0.5, 0.5, 2, 1.0, 10.0)
+    r = score_tapping(f)
+    assert r.score == 3 and len(r.reasons) == 5
 
 
 def test_tapping_no_hand_is_unscored():
-    assert score_tapping(replace(NORMAL_TAP, hand_visible=0.2)).score is None
+    f = analyze_tapping([i / 30 for i in range(300)], [None] * 300)
+    assert score_tapping(f).score is None
 
 
-def test_asymmetry_flags_score_and_feature():
-    r, l = NORMAL_TAP, replace(NORMAL_TAP, taps_per_sec=2.5)
-    flags = tapping_asymmetry(r, l, ScoreResult(0, ()), ScoreResult(1, ()))
-    assert any("left side worse" in f for f in flags)
-    assert any("taps/s" in f for f in flags)
+# --- asymmetry --------------------------------------------------------------------------
+def test_asymmetry_right3_left0_flagged():
+    assert asymmetry("Tapping", ScoreResult(3, ["x"]), ScoreResult(0, ["y"]))
 
 
-def test_tremor_asymmetry_ignores_noise_level():
-    flags = tremor_asymmetry(tremor(disp=0.01), tremor(disp=0.05),
-                             ScoreResult(0, ()), ScoreResult(0, ()))
-    assert flags == ()
+def test_asymmetry_right1_left1_not_flagged():
+    assert asymmetry("Tapping", ScoreResult(1, ["x"]), ScoreResult(1, ["y"]),
+                     "taps/s", 3.0, 2.9) == []
+
+
+def test_asymmetry_feature_25_percent():
+    flags = asymmetry("Tapping", ScoreResult(0, ["x"]), ScoreResult(0, ["y"]), "taps/s", 4.0, 2.9)
+    assert len(flags) == 1 and "taps/s" in flags[0]
+
+
+def test_tremor_asymmetry_ignores_noise_levels():
+    a, b = analyze_tremor(*signal(accel=0.0, seed=1)), analyze_tremor(*signal(accel=0.0, seed=2))
+    assert tremor_asymmetry(a, b, score_tremor(a), score_tremor(b)) == []
+
+
+def test_tremor_asymmetry_real_difference():
+    a, b = analyze_tremor(*signal(accel=19.7)), analyze_tremor(*signal(accel=0.0))
+    flags = tremor_asymmetry(a, b, score_tremor(a), score_tremor(b))
+    assert any("Right worse" in f for f in flags) and any("displacement" in f for f in flags)
+
+
+def test_tapping_asymmetry_from_signals():
+    r, l = analyze_tapping(*taps(rate=1.5)), analyze_tapping(*taps(rate=3.0))
+    flags = tapping_asymmetry(r, l, score_tapping(r), score_tapping(l))
+    assert flags
+
+
+# --- every score has a reason -------------------------------------------------------------
+def test_every_score_has_a_reason():
+    tremors = [analyze_tremor(*signal(accel=a)) for a in (0, 4.93, 19.7, 49, 110)]
+    tremors.append(analyze_tremor(*signal(seconds=1.0)))
+    tapping = [analyze_tapping(*taps(**kw)) for kw in
+               ({}, {"shrink": 0.5}, {"pauses": (3.0, 6.5)}, {"rate": 1.0, "amp": 0.3})]
+    tapping.append(analyze_tapping([i / 30 for i in range(300)], [0.2] * 300))
+    results = [score_tremor(f) for f in tremors] + [score_tapping(f) for f in tapping]
+    assert {r.score for r in results} >= {0, 1, 2, 3, 4}
+    for r in results:
+        assert r.reasons and all(isinstance(s, str) and s for s in r.reasons)
