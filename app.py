@@ -163,7 +163,7 @@ class App:
         self._goto("trend", now)
         try:
             self.trend_img = history.trend_image(history.load_sessions(self.history_path),
-                                                 ui.W, ui.H)
+                                                 ui.W, ui.H - 36)
         except Exception:
             log.exception("trend render failed")
             self.trend_img = None
@@ -410,13 +410,15 @@ class App:
             ui.text(c, "No left/right asymmetry flagged", (20, y + 18), 0.65, ui.GREY)
 
     def _draw_trend(self) -> np.ndarray:
+        c = ui.blank()
         if self.trend_img is None:
-            c = ui.blank()
             ui.centred(c, "Trend chart unavailable (see console)", 360, 1.0, ui.REC)
         else:
-            c = self.trend_img.copy()
+            c[:self.trend_img.shape[0]] = self.trend_img
+        ui.panel(c, 0, ui.H - 36, ui.W, 36)
+        ui.text(c, DISCLAIMER, (20, ui.H - 12), 0.55, ui.WARN)
         hint = "SPACE new session   R restart   Q quit"
-        ui.text(c, hint, (ui.W - 20 - ui.text_width(hint, 0.5), ui.H - 10), 0.5, (90, 90, 90))
+        ui.text(c, hint, (ui.W - 20 - ui.text_width(hint, 0.5), ui.H - 12), 0.5, ui.GREY)
         return c
 
 
@@ -444,21 +446,32 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def run(app: App, hands, device) -> None:
+def run(app: App, hands, device, key_script=None, on_frame=None) -> int:
+    """Main loop. key_script(now)->key|-1 injects keys (scripted GUI test);
+    on_frame(app, canvas) observes each frame. Returns the number of caught errors."""
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WINDOW, ui.W, ui.H)
-    key = -1
+    key, errors = -1, 0
     try:
         while app.running:
+            now = time.monotonic()
+            if key < 0 and key_script is not None:
+                key = key_script(now)
             try:
-                canvas = app.tick(key, time.monotonic())
+                canvas = app.tick(key, now)
             except Exception:
                 # Keep the demo alive: log, show an error screen, let R restart.
+                errors += 1
                 log.error("Unexpected error:\n%s", traceback.format_exc())
                 canvas = ui.blank()
                 ui.centred(canvas, "Something went wrong - press R to restart", 360, 1.0, ui.REC)
                 if key >= 0 and chr(key & 0xFF).lower() == "r":
-                    app.restart(time.monotonic())
+                    try:
+                        app.restart(time.monotonic())
+                    except Exception:
+                        log.error("Restart failed:\n%s", traceback.format_exc())
+            if on_frame is not None:
+                on_frame(app, canvas)
             cv2.imshow(WINDOW, canvas)
             key = cv2.waitKey(1)
             if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
@@ -471,6 +484,7 @@ def run(app: App, hands, device) -> None:
             device.close()
             hands.close()
             cv2.destroyAllWindows()
+    return errors
 
 
 def main(argv=None) -> None:
