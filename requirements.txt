@@ -1,0 +1,8 @@
+# Python 3.11 (mediapipe 0.10.14 has no wheels for 3.13+)
+mediapipe==0.10.14
+opencv-python>=4.8,<4.11
+numpy>=1.24,<2
+scipy>=1.10
+pyserial>=3.5
+matplotlib>=3.7
+pytest>=8
