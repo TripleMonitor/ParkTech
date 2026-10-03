@@ -306,3 +306,33 @@ def brackets(canvas, x: int, y: int, w: int, h: int, colour=ACCENT, length: int 
     for cx, cy, dx, dy in ((x, y, 1, 1), (x + w, y, -1, 1), (x, y + h, 1, -1), (x + w, y + h, -1, -1)):
         cv2.line(canvas, (cx, cy), (cx + dx * length, cy), colour, 2)
         cv2.line(canvas, (cx, cy), (cx, cy + dy * length), colour, 2)
+
+
+DIM_OK = (70, 140, 60)
+
+
+def rule_panel(canvas, x: int, y: int, w: int, h: int, title: str, explanation,
+               flag: str = "") -> None:
+    """WHY THIS SCORE: every rule with measured value vs threshold; fired rules lit."""
+    panel(canvas, x, y, w, h)
+    score = explanation.score
+    col = SCORE_COLOURS.get(score, SCORE_COLOURS[None])
+    text(canvas, "WHY THIS SCORE", (x + 16, y + 28), 0.55, ACCENT, 2)
+    text(canvas, "demo thresholds", (x + 16, y + 48), 0.38, WARN)
+    text(canvas, title, (x + 16, y + 74), 0.5, WHITE)
+    text(canvas, "-" if score is None else str(score), (x + w - 70, y + 70), 2.0, col, 3)
+    if flag:
+        badge(canvas, flag, x + w - 200, y + 82, WARN, 0.38)
+    yy = y + 118
+    if not explanation.rules:
+        text(canvas, "no rules evaluated:", (x + 16, yy), 0.45, GREY)
+        yy += 22
+    for r in explanation.rules:
+        c = (REC if (score or 0) >= 3 else WARN) if r.fired else DIM_OK
+        text(canvas, "\u2717" if r.fired else "\u2713", (x + 16, yy), 0.5, c, 2)
+        text(canvas, r.label, (x + 40, yy), 0.45, c if r.fired else GREY)
+        text(canvas, r.measured, (x + 250, yy), 0.45, WHITE if r.fired else GREY)
+        text(canvas, r.threshold, (x + 340, yy), 0.42, c)
+        yy += 26
+    for i, line in enumerate(wrap(explanation.formula, w - 32, 0.4)[:3]):
+        text(canvas, line, (x + 16, y + h - 46 + i * 17), 0.4, DIM)

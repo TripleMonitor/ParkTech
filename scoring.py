@@ -198,3 +198,81 @@ def flipping_asymmetry(rf: FlippingFeatures, lf: FlippingFeatures,
                        rs: ScoreResult, ls: ScoreResult) -> list[str]:
     return asymmetry("Flipping", rs, ls, "flips/s", rf.flips_per_sec, lf.flips_per_sec,
                      compare_feature=_both_scored(rs, ls))
+
+
+# --------------------------------------------------------------------------- explainability
+class Rule(NamedTuple):
+    """One scoring rule as shown in the WHY THIS SCORE panel."""
+    label: str
+    measured: str
+    threshold: str
+    fired: bool          # True = this rule found a problem / raised the score
+
+
+class Explanation(NamedTuple):
+    score: Optional[int]
+    rules: list[Rule]
+    formula: str
+
+
+def explain_tremor(f: TremorFeatures, expected_s: Optional[float] = None) -> Explanation:
+    s = score_tremor(f, expected_s).score
+    if s is None:
+        return Explanation(None, [], "not scored: not enough usable data")
+    d = f.displacement_cm if f.clear_peak else 0.0
+    c1, c2, c3 = TREMOR_CUTS_CM
+    in_pd = f.clear_peak and PD_BAND_HZ[0] <= f.peak_hz <= PD_BAND_HZ[1]
+    rules = [
+        Rule("Distinct peak 3-8 Hz", ">99x" if f.peak_ratio > 99 else f"{f.peak_ratio:.1f}x", f">= {CLEAR_PEAK_RATIO:g}x + local max",
+             f.clear_peak),
+        Rule("Peak in PD range", f"{f.peak_hz:.1f} Hz", "4-6 Hz", in_pd),
+        Rule("Amplitude", f"{d:.2f} cm", f">= {MIN_TREMOR_CM:g} cm", d >= MIN_TREMOR_CM),
+        Rule("Amplitude", f"{d:.2f} cm", f">= {c1:g} cm", d >= c1),
+        Rule("Amplitude", f"{d:.2f} cm", f">= {c2:g} cm", d >= c2),
+        Rule("Amplitude", f"{d:.2f} cm", f">= {c3:g} cm", d >= c3),
+    ]
+    return Explanation(s, rules, "score = number of amplitude rules fired "
+                                 "(0 if no distinct peak); PD-range row is info only")
+
+
+def explain_tapping(f: TappingFeatures) -> Explanation:
+    s = score_tapping(f).score
+    if s is None:
+        return Explanation(None, [], "not scored: hand not visible enough")
+    rules = [
+        Rule("Taps detected", f"{f.n_taps}", f"< {TAP_MIN_TAPS} -> score 4", f.n_taps < TAP_MIN_TAPS),
+        Rule("Speed", f"{f.taps_per_sec:.1f}/s", f"< {TAP_SLOW:g}/s", f.taps_per_sec < TAP_SLOW),
+        Rule("Amplitude", f"{f.mean_amplitude:.2f}", f"< {TAP_SMALL:g}", f.mean_amplitude < TAP_SMALL),
+        Rule("Decrement", f"{f.decrement:.0%}", f"> {TAP_DECREMENT:.0%}", f.decrement > TAP_DECREMENT),
+        Rule("Rhythm CV", f"{f.interval_cv:.2f}", f"> {TAP_IRREGULAR_CV:g}",
+             f.interval_cv > TAP_IRREGULAR_CV),
+        Rule("Hesitations", f"{f.hesitations}", ">= 1", f.hesitations >= 1),
+    ]
+    return Explanation(s, rules, "score = min(3, problems fired); 4 if < 5 taps")
+
+
+def explain_flipping(f: FlippingFeatures) -> Explanation:
+    s = score_flipping(f).score
+    if s is None:
+        return Explanation(None, [], "not scored")
+    rules = [
+        Rule("Full flips", f"{f.full_flips}", f"< {FLIP_MIN_FULL} -> score 4",
+             f.full_flips < FLIP_MIN_FULL),
+        Rule("Speed", f"{f.flips_per_sec:.2f}/s", f"< {FLIP_SLOW:g}/s", f.flips_per_sec < FLIP_SLOW),
+        Rule("Rhythm CV", f"{f.interval_cv:.2f}", f"> {FLIP_IRREGULAR_CV:g}",
+             f.interval_cv > FLIP_IRREGULAR_CV),
+        Rule("Slowdown", f"{f.decrement:.0%}", f"> {FLIP_DECREMENT:.0%}", f.decrement > FLIP_DECREMENT),
+        Rule("Hesitations", f"{f.hesitations}", ">= 1", f.hesitations >= 1),
+    ]
+    return Explanation(s, rules, "score = min(3, problems fired); 4 if < 5 full flips")
+
+
+def score_from_rules(kind: str, e: Explanation) -> Optional[int]:
+    """Recompute the score from the rule list alone (used to prove panel == scorer)."""
+    if e.score is None:
+        return None
+    if kind == "tremor":
+        return 0 if not e.rules[0].fired else sum(r.fired for r in e.rules[2:])
+    if e.rules[0].fired:
+        return 4
+    return min(3, sum(r.fired for r in e.rules[1:]))

@@ -29,7 +29,8 @@ import ui
 from boot import BootChecks
 from quality import SignalQuality, signal_quality
 from flipping_analysis import FlippingFeatures, analyze_flipping, debounce
-from scoring import (ScoreResult, flipping_asymmetry, score_flipping, score_tapping, score_tremor,
+from scoring import (ScoreResult, explain_flipping, explain_tapping, explain_tremor,
+                     flipping_asymmetry, score_flipping, score_tapping, score_tremor,
                      tapping_asymmetry, tremor_asymmetry)
 from tapping_analysis import TappingFeatures, analyze_tapping, detect_taps
 from tapping_tracker import HandFrame, draw_distance_graph, draw_hand
@@ -582,14 +583,25 @@ class App:
         self._test_title(c)
         tr = self.results[self.test]
         self._draw_done_left(c, tr)
-        ui.score_card(c, 760, 135, 500, 300, TITLES[tr.kind], tr.result.score, tr.result.reasons,
+        ui.rule_panel(c, 760, 125, 500, 420, f"{tr.hand} - {TITLES[tr.kind]}", self._explain(tr),
                       flag="LOW CONFIDENCE" if tr.low_confidence else "")
         if self.idx + 1 < len(TESTS):
             kind, hand = TESTS[self.idx + 1]
-            ui.text(c, f"Next: {hand.upper()} hand {kind}", (770, 485), 0.85, ui.WHITE, 1)
-            ui.text(c, "SPACE to continue", (770, 640), 0.9, ui.ACCENT, 2)
+            ui.text(c, f"NEXT: {hand.upper()} {TITLES[kind]}", (770, 585), 0.55, ui.WHITE)
+            ui.text(c, "SPACE to continue", (770, 630), 0.75, ui.ACCENT, 2)
         else:
-            ui.text(c, "SPACE for results", (770, 520), 1.0, ui.ACCENT, 2)
+            ui.text(c, "SPACE for results", (770, 610), 0.85, ui.ACCENT, 2)
+
+    def _explain(self, tr: TestResult):
+        if tr.kind == "tremor":
+            e = explain_tremor(tr.features, self.seconds)
+        elif tr.kind == "tapping":
+            e = explain_tapping(tr.features)
+        else:
+            e = explain_flipping(tr.features)
+        if tr.result.score is None:          # e.g. Arduino lost: show why, no rules
+            return e._replace(score=None, rules=[], formula="not scored: " + tr.result.reasons[0])
+        return e
 
     def _draw_results(self, c, now) -> None:
         ui.text(c, "Results", (20, 100), 1.0, ui.ACCENT, 2)
