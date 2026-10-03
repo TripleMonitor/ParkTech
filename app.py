@@ -27,6 +27,7 @@ import history
 import hud
 import ui
 from boot import BootChecks
+from coach_session import CoachSession
 from quality import SignalQuality, signal_quality
 from flipping_analysis import FlippingFeatures, analyze_flipping, debounce
 from fusion import FusionResult, current_angle, fuse, palm_normal
@@ -134,6 +135,11 @@ class App:
         self.trend_img: Optional[np.ndarray] = None
         self.save_msg = ""
         self.session_id = hud.session_id()
+        if getattr(self, "coach", None) is not None:
+            self.coach.abort()
+        self.coach: Optional[CoachSession] = None
+        self.coach_results: dict = {}
+        self.coach_return = "welcome"
         self.last_beep = 0
         self.device.led("OFF")
         self.device.lcd("NeuroCheck", "Press SPACE")
@@ -293,6 +299,14 @@ class App:
             log.error("Could not save session: %s", exc)
             self.save_msg = f"NOT saved: {exc.strerror} (is {self.history_path} open in Excel?)"
 
+    def _save_coach_row(self, hand: str, summary) -> None:
+        try:
+            history.save_session({"session_id": self.session_id,
+                                  f"coach_{hand[0]}_rate": summary.max_sustainable_rate},
+                                 self.history_path)
+        except OSError as exc:
+            log.error("Could not save coach result: %s", exc)
+
     def _enter_trend(self, now: float) -> None:
         self._goto("trend", now)
         try:
@@ -321,6 +335,8 @@ class App:
 
     def _session_row(self) -> dict:
         row: dict = {"asymmetry": " ; ".join(self.flags), "session_id": self.session_id}
+        for hand, s in self.coach_results.items():
+            row[f"coach_{hand[0]}_rate"] = s.max_sustainable_rate
         for (kind, hand), tr in self.results.items():
             side, f = hand[0], tr.features
             if isinstance(f, TremorFeatures):
@@ -356,6 +372,22 @@ class App:
             self.device.flipping = not self.device.flipping
         elif ch == "h" and self.state in ("welcome", "results"):
             self._enter_trend(now)
+        elif ch == "c" and self.state in ("welcome", "results"):
+            self.coach_return = self.state
+            self.coach = CoachSession(self.device, "Right", self.clock)
+            self._goto("coach", now)
+        elif ch == "l" and self.state == "coach" and self.coach.phase == "ready":
+            other = "Left" if self.coach.hand == "Right" else "Right"
+            self.coach = CoachSession(self.device, other, self.clock)
+        elif self.state == "coach" and go:
+            if self.coach.phase == "ready":
+                self.coach.start()
+            elif self.coach.phase == "done":
+                if self.coach.summary is not None:
+                    self.coach_results[self.coach.hand] = self.coach.summary
+                    if self.coach_return == "results":     # session row already saved
+                        self._save_coach_row(self.coach.hand, self.coach.summary)
+                self._goto(self.coach_return, now)
         elif not go:
             return
         elif self.state == "boot":
@@ -379,6 +411,9 @@ class App:
 
     # ---------------------------------------------------------------- update
     def update(self, now: float) -> None:
+        if self.state == "coach":
+            self.coach.tick()
+            return
         kind, hand = self.test
         elapsed = now - self.t_state
         if self.state == "countdown":
@@ -485,7 +520,7 @@ class App:
     def _hints(self) -> str:
         if self.state == "boot":
             return "SPACE continue (when done)   Q quit"
-        hints = "SPACE next   R restart   H trend   Q quit"
+        hints = "SPACE next  C coach  R restart  H trend  Q quit"
         sim = [k for k, ok in (("T tremor", hasattr(self.hands, "tremor_enabled")),
                                ("F stuck sensor", hasattr(self.device, "flipping"))) if ok]
         return ("sim: " + " ".join(sim) + " | " + hints) if sim else hints
@@ -507,6 +542,68 @@ class App:
             hud.banner(c, f"{dev.status}  -  reconnecting automatically", (40, 40, 150))
         elif getattr(dev, "warning", ""):
             hud.banner(c, f"Arduino: {dev.warning}", (0, 110, 160))
+
+    def _draw_coach(self, c, now) -> None:
+        co = self.coach
+        ui.text(c, "RHYTHM COACH", (20, 100), 0.9, ui.ACCENT, 2)
+        ui.text(c, f"{co.hand.upper()} hand  |  hand flipping to a metronome", (290, 98), 0.5, ui.GREY)
+        ui.text(c, co.gains_text(), (20, 124), 0.42, ui.DIM)
+        if co.phase == "ready":
+            ui.panel(c, 20, 140, 1240, 500)
+            lines = ["Tilt sensor on the back of the hand, hold it PALM-DOWN.",
+                     "1) 10 s: flip at your own pace (uncued baseline).",
+                     "2) 35 s: flip once per beat. The tempo adapts with a PID controller",
+                     "   to find the fastest rhythm you can keep (target: 85% on time).",
+                     "", "SPACE start    L switch hand    R cancel"]
+            for i, line in enumerate(lines):
+                ui.text(c, line, (60, 200 + i * 40), 0.6, ui.WHITE if i < 5 else ui.ACCENT)
+            ui.flip_indicator(c, co.palm_down, 760, 470, 460, 120)
+            return
+        if co.phase == "countdown":
+            n = max(1, 3 - int(co.clock() - co.t_phase))
+            ui.centred(c, str(n), 420, 4.0, ui.ACCENT, 4)
+            return
+        if co.phase == "done":
+            self._draw_coach_done(c, co)
+            return
+        el = co.clock() - co.t_phase
+        total = co.uncued_s if co.phase == "uncued" else co.cued_s
+        label = "UNCUED - flip at your own pace" if co.phase == "uncued" else \
+            f"CUED - tempo {co.coach.rate:.2f} beats/s ({1000 / co.coach.rate:.0f} ms)"
+        ui.text(c, label, (20, 160), 0.6, ui.WHITE, 2)
+        ui.text(c, f"{max(0.0, total - el):4.1f}s", (1100, 160), 0.8, ui.REC, 2)
+        ui.beat_circle(c, 180, 330, co.beat_pulse(),
+                       "beat (buzzer + LED from the Arduino)" if co.phase == "cued" else "no cue yet")
+        ui.flip_indicator(c, co.palm_down, 20, 500, 340, 80)
+        ui.coach_graph(c, co.series, 380, 180, 880, 400, co.cued_s)
+        if co.coach is not None:
+            otr = co.coach.on_time_rate()
+            recs = co.coach.records
+            stats = (f"beats {len(recs)}   on-time rate {'--' if otr is None else f'{otr:.2f}'}   "
+                     f"missed {sum(r.on_time is None for r in recs)}   "
+                     f"{'PROBING' if co.coach.probing else 'PID'}")
+            ui.text(c, stats, (380, 610), 0.5, ui.GREY)
+        ui.text(c, f"half-flips {len(co.flips)}", (20, 610), 0.5, ui.GREY)
+
+    def _draw_coach_done(self, c, co) -> None:
+        s = co.summary
+        ui.panel(c, 20, 140, 600, 460)
+        ui.text(c, "COACH RESULT", (40, 180), 0.7, ui.ACCENT, 2)
+        rows = [("Max sustainable rhythm", f"{s.max_sustainable_rate:.2f} beats/s"),
+                ("  = full flips/s", f"{s.max_sustainable_rate / 2:.2f}"),
+                ("Mean asynchrony", "--" if s.mean_asynchrony_ms is None else f"{s.mean_asynchrony_ms:+.0f} ms"),
+                ("On-time rate (last 8)", "--" if s.on_time_rate is None else f"{s.on_time_rate:.2f}"),
+                ("Beats / missed", f"{s.beats} / {s.missed}"),
+                ("Uncued rate", f"{s.uncued_rate:.2f} half-flips/s"),
+                ("Cued rate (last 10 s)", f"{s.cued_rate:.2f} half-flips/s"),
+                ("Cueing effect", f"{(s.cued_rate / s.uncued_rate - 1):+.0%}" if s.uncued_rate else "--")]
+        for i, (k, v) in enumerate(rows):
+            ui.text(c, k, (40, 225 + i * 42), 0.5, ui.GREY)
+            ui.text(c, v, (330, 225 + i * 42), 0.55, ui.WHITE)
+        ui.text(c, "SIM patient - not a measurement" if self.sim_dev else "demo tracking metric",
+                (40, 580), 0.45, ui.WARN)
+        ui.coach_graph(c, co.series, 640, 140, 620, 460, co.cued_s)
+        ui.text(c, "SPACE to continue", (640, 640), 0.7, ui.ACCENT, 2)
 
     def _draw_boot(self, c, now) -> None:
         hud.boot_screen(c, self.boot, now)

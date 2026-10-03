@@ -72,6 +72,19 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
             tick(KEY_SPACE)                           # done -> ready (next test)
     results_img = tick(KEY_SPACE)                     # last done -> results
     snap("06_results", results_img)
+    # rhythm coach (C) from the results screen, right hand, full 45 s
+    tick(ord("c"))
+    snap("08_coach_ready", tick())
+    tick(KEY_SPACE)
+    while app.coach.phase != "done":
+        img = tick()
+        if app.coach.phase == "cued" and clock.t - app.coach.t_phase > 25:
+            snap("09_coach_cued", img)
+        if clock.t > 20_000:
+            raise RuntimeError(f"coach stuck in {app.coach.phase}")
+    snap("10_coach_done", tick())
+    tick(KEY_SPACE)                                   # back to results
+    results_img = tick()
     trend_img = tick(KEY_SPACE)                       # results -> trend
     snap("07_trend", trend_img)
     if screens_dir:
@@ -113,7 +126,7 @@ def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[st
         ("Asymmetry flagged (all 3 tests)",
          all(any(f.startswith(t) for f in app.flags) for t in ("Tremor", "Tapping", "Flipping")),
          f"{len(app.flags)} flag(s)"),
-        ("sessions.csv written", len(rows) == 1 and rows[0]["tremor_R"] == str(rt)
+        ("sessions.csv written", len(rows) >= 1 and rows[0]["tremor_R"] == str(rt)
          and rows[0]["flip_R"] == str(rf) and rows[0]["session_id"] == app.session_id,
          f"{len(rows)} row(s)"),
         ("Fusion locked on both hands (camera agrees with switch)",
@@ -126,11 +139,18 @@ def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[st
          < res[("flipping", "Left")].fusion.median_amplitude_deg,
          f"R {res[('flipping', 'Right')].fusion.median_amplitude_deg:.0f} deg vs "
          f"L {res[('flipping', 'Left')].fusion.median_amplitude_deg:.0f} deg"),
+        ("Rhythm coach finished, rate near SIM patient max (2.6/s)",
+         "Right" in app.coach_results
+         and abs(app.coach_results["Right"].max_sustainable_rate - 2.6) / 2.6 < 0.2,
+         "" if "Right" not in app.coach_results else
+         f"{app.coach_results['Right'].max_sustainable_rate:.2f} beats/s, "
+         f"{app.coach_results['Right'].beats} beats"),
         ("Signal quality measured on camera tests",
          all(res[(k, h)].quality is not None and res[(k, h)].quality.frames > 250
              for k in ("tremor", "tapping") for h in ("Right", "Left")),
          f"{res[('tremor', 'Right')].quality.frames} frames"),
-        ("Beeps: 3 countdown + 2 done per test", dev.beeps == 6 * (3 + 2), f"{dev.beeps} beeps"),
+        ("Beeps: 3 countdown + 2 done per test, +3 coach countdown",
+         dev.beeps == 6 * (3 + 2) + 3, f"{dev.beeps} beeps"),
         ("LED colour from results", dev.last_led == led_for([rt, lt, rp, lp, rf, lf]),
          f"LED {dev.last_led}"),
         ("LCD shows scores", dev.last_lcd[0].startswith("R tr") and dev.last_lcd[1].startswith("L tr")

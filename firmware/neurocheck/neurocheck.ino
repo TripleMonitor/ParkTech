@@ -5,7 +5,10 @@
 //   Arduino -> PC:  READY (boot)
 //                   S,millis,0|1   on every debounced switch change (only between START/STOP)
 //                                  and as the reply to STATE (any time)
+//                   C,millis       one per metronome beat while the cue is on
 //   PC -> Arduino:  START | STOP | STATE | BEEP,n | LED,G|Y|R|B|OFF | LCD,line1|line2
+//                   CUE,ON,<ms> | CUE,OFF | TEMPO,<ms>   (beat interval clamped 200-1500 ms;
+//                   a TEMPO change applies from the next beat)
 //
 // Pin table (no conflicts; see CLAUDE.md / README):
 //   D2  SW-520D (bare 2-leg: other leg to GND, INPUT_PULLUP | 3-pin module: DO, VCC 5V, GND)
@@ -67,6 +70,13 @@ uint8_t beepsLeft = 0;
 bool beepOn = false;
 unsigned long beepNextMs = 0;
 
+// rhythm cue (metronome) - timed by the Arduino itself with millis()
+const unsigned long CUE_MIN_MS = 200, CUE_MAX_MS = 1500, CUE_CLICK_MS = 40;
+bool cueOn = false;
+unsigned long cueIntervalMs = 600, cuePendingMs = 600, cueNextMs = 0, cueClickOffMs = 0;
+bool cueClicking = false;
+char ledColour[4] = "OFF";
+
 // ---------------------------------------------------------------- tilt switch
 uint8_t readSwitch() {
 #if SWITCH_MODULE
@@ -104,6 +114,7 @@ void ledWrite(uint8_t pin, uint8_t level) {
 }
 
 void setLed(const char *c) {
+  strncpy(ledColour, c, sizeof(ledColour) - 1);
   uint8_t r = 0, g = 0, b = 0;
   if (strcmp(c, "R") == 0) r = 255;
   else if (strcmp(c, "G") == 0) g = 255;
@@ -143,6 +154,41 @@ void updateBeeper() {
     beepsLeft--;
     beepNextMs = now + BEEP_ON_MS;
   }
+}
+
+// ---------------------------------------------------------------- rhythm cue
+unsigned long clampCue(long ms) {
+  if (ms < (long)CUE_MIN_MS) return CUE_MIN_MS;
+  if (ms > (long)CUE_MAX_MS) return CUE_MAX_MS;
+  return (unsigned long)ms;
+}
+
+void ledRaw(uint8_t r, uint8_t g, uint8_t b) {
+  ledWrite(PIN_R, r);
+  ledWrite(PIN_G, g);
+  ledWrite(PIN_B, b);
+}
+
+void updateCue() {
+  unsigned long now = millis();
+  if (cueClicking && (long)(now - cueClickOffMs) >= 0) {     // end of click + flash
+    cueClicking = false;
+    if (!beepOn) buzzer(false);
+    char saved[4];
+    strncpy(saved, ledColour, sizeof(saved));
+    setLed(saved);                                           // restore the result colour
+  }
+  if (!cueOn || (long)(now - cueNextMs) < 0) return;
+  unsigned long beat = cueNextMs;
+  cueIntervalMs = cuePendingMs;                              // TEMPO applies from this beat on
+  cueNextMs = beat + cueIntervalMs;
+  if ((long)(now - cueNextMs) >= 0) cueNextMs = now + cueIntervalMs;   // never burst-catch-up
+  buzzer(true);
+  ledRaw(255, 255, 255);
+  cueClicking = true;
+  cueClickOffMs = now + CUE_CLICK_MS;
+  Serial.print(F("C,"));
+  Serial.println(beat);
 }
 
 // ---------------------------------------------------------------- LCD (optional)
@@ -209,6 +255,14 @@ void handleCommand(const char *c) {
     setLed(c + 4);
   } else if (strncmp(c, "LCD,", 4) == 0) {
     lcdShow(c + 4);
+  } else if (strncmp(c, "CUE,ON,", 7) == 0) {
+    cuePendingMs = cueIntervalMs = clampCue(atol(c + 7));
+    cueOn = true;
+    cueNextMs = millis();                                    // first beat now
+  } else if (strcmp(c, "CUE,OFF") == 0) {
+    cueOn = false;
+  } else if (strncmp(c, "TEMPO,", 6) == 0) {
+    cuePendingMs = clampCue(atol(c + 6));
   }
 }
 
@@ -256,4 +310,5 @@ void loop() {
   readSerial();
   updateSwitch();
   updateBeeper();
+  updateCue();
 }

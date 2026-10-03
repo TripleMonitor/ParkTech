@@ -20,6 +20,35 @@ def test_parser_accepts_good_lines():
     assert parse_line(b"\xff\xfeS,7,1") == (7.0, 1)       # garbage bytes before a line
 
 
+def test_parse_beat():
+    from device import parse_beat
+    assert parse_beat("C,1234\r\n") == 1234.0
+    for bad in ("", "C,", "C,x", "C,-1", "C,1,2", "S,1,1", "c,5"):
+        assert parse_beat(bad) is None
+
+
+def test_mock_metronome_and_simulated_patient():
+    clock = FakeClock()
+    dev = MockDevice(clock=clock)
+    dev.sim_hand = "Left"
+    dev.start()
+    dev.cue_on(400)
+    beats, flips = [], []
+    while clock.t < 10.0:
+        clock.t += 1 / 30
+        beats += dev.drain_beats()
+        flips += dev.drain()
+    assert len(beats) == pytest.approx(25, abs=1)          # 10 s at 400 ms
+    assert len(flips) >= 20                                # patient answers most beats
+    dev.tempo(5000)                                        # clamped to 1500 ms
+    n = len(beats)
+    while clock.t < 16.0:
+        clock.t += 1 / 30
+        beats += dev.drain_beats()
+    assert len(beats) - n <= 5
+    dev.cue_off()
+
+
 def test_lcd_command_truncates_and_sanitises():
     assert lcd_command("A" * 20, "x|y,z") == "LCD," + "A" * 16 + "|x/y z"
 

@@ -376,3 +376,38 @@ def rule_panel(canvas, x: int, y: int, w: int, h: int, title: str, explanation,
         yy += 26
     for i, line in enumerate(wrap(explanation.formula, w - 32, 0.4)[:3]):
         text(canvas, line, (x + 16, y + h - 46 + i * 17), 0.4, DIM)
+
+
+def coach_graph(canvas, series, x: int, y: int, w: int, h: int, seconds: float = 35.0) -> None:
+    """Tempo vs patient rate (beats/s, left) and on-time rate (0-1, right) with 0.85 line."""
+    panel(canvas, x, y, w, h)
+    text(canvas, "tempo", (x + 12, y + 20), 0.42, ACCENT, 2)
+    text(canvas, "patient rate", (x + 82, y + 20), 0.42, OK, 2)
+    text(canvas, "on-time rate (0-1)", (x + 212, y + 20), 0.42, WARN, 2)
+    gx, gy, gw, gh = x + 40, y + 34, w - 80, h - 60
+    vmax = 5.0
+    y85 = gy + gh - int(gh * 0.85)
+    cv2.line(canvas, (gx, y85), (gx + gw, y85), WARN, 1, cv2.LINE_AA)
+    text(canvas, "0.85", (gx + gw + 4, y85 + 4), 0.36, WARN)
+    for v in range(0, 6):
+        yy = gy + gh - int(gh * v / vmax)
+        cv2.line(canvas, (gx - 4, yy), (gx, yy), DIM, 1)
+        text(canvas, str(v), (x + 14, yy + 4), 0.36, DIM)
+    text(canvas, "beats/s", (x + 6, y + h - 8), 0.34, DIM)
+    if len(series) < 2:
+        return
+    for idx, col, scale in ((1, ACCENT, vmax), (2, OK, vmax), (3, WARN, 1.0)):
+        pts = [(gx + int(gw * min(s[0], seconds) / seconds), gy + gh - int(gh * min(s[idx], scale) / scale))
+               for s in series if s[idx] is not None]
+        if len(pts) >= 2:
+            cv2.polylines(canvas, [np.array(pts, np.int32)], False, col, 2, cv2.LINE_AA)
+
+
+def beat_circle(canvas, cx: int, cy: int, pulse: float, label: str) -> None:
+    r = int(55 + 35 * pulse)
+    glow = canvas.copy()
+    cv2.circle(glow, (cx, cy), r + 18, ACCENT, -1, cv2.LINE_AA)
+    cv2.addWeighted(glow, 0.15 + 0.35 * pulse, canvas, 0.85 - 0.35 * pulse, 0, dst=canvas)
+    cv2.circle(canvas, (cx, cy), r, ACCENT, 3, cv2.LINE_AA)
+    cv2.circle(canvas, (cx, cy), max(6, int(r * pulse)), WHITE, -1, cv2.LINE_AA)
+    centred(canvas, label, cy + r + 34, 0.5, GREY, 1, cx - 150, cx + 150)

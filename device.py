@@ -6,8 +6,9 @@ Both share the same interface:
 
 Protocol (115200 baud, newline-terminated):
   Arduino -> PC:  READY on boot;  S,millis,0|1  on every debounced change (between START/STOP)
-                  and as the reply to STATE
+                  and as the reply to STATE;  C,millis  one per metronome beat (cue on)
   PC -> Arduino:  START / STOP / STATE / BEEP,n / LED,G|Y|R|OFF / LCD,line1|line2
+                  CUE,ON,<ms> / CUE,OFF / TEMPO,<ms>   (beat interval, clamped 200-1500)
 """
 from __future__ import annotations
 
@@ -61,6 +62,27 @@ def parse_line(line) -> Optional[SwitchReport]:
     if not math.isfinite(t_ms) or t_ms < 0:
         return None
     return SwitchReport(t_ms, int(parts[2]))
+
+
+def parse_beat(line) -> Optional[float]:
+    """Parse 'C,millis' (metronome beat). Returns Arduino millis or None."""
+    if isinstance(line, bytes):
+        line = line.decode("ascii", errors="ignore")
+    parts = line.strip().split(",")
+    if len(parts) != 2 or parts[0] != "C":
+        return None
+    try:
+        t = float(parts[1])
+    except ValueError:
+        return None
+    return t if math.isfinite(t) and t >= 0 else None
+
+
+CUE_MIN_MS, CUE_MAX_MS = 200, 1500
+
+
+def clamp_interval(ms: float) -> int:
+    return int(min(CUE_MAX_MS, max(CUE_MIN_MS, round(ms))))
 
 
 def lcd_command(line1: str, line2: str = "") -> str:
@@ -128,6 +150,7 @@ class ArduinoDevice:
         self._clock = clock
         self.port = port or "?"
         self._events: "queue.Queue[SwitchReport]" = queue.Queue()   # raw Arduino times
+        self._beats: "queue.Queue[float]" = queue.Queue()            # raw Arduino millis
         self._writes: "queue.Queue[str]" = queue.Queue(maxsize=WRITE_QUEUE_MAX)
         self._ser = None
         self._ser_lock = threading.Lock()
@@ -238,6 +261,12 @@ class ArduinoDevice:
                 if self._events.qsize() < MAX_BUFFER:
                     self._events.put(rep)
                 continue
+            beat = parse_beat(raw)
+            if beat is not None:
+                self._mapper.observe(beat, received)
+                if self._beats.qsize() < MAX_BUFFER:
+                    self._beats.put(beat)
+                continue
             text = raw.decode("ascii", errors="ignore").strip()
             if text.startswith("ERROR"):
                 self._firmware_error(text)
@@ -330,6 +359,24 @@ class ArduinoDevice:
                 break
         return [SwitchEvent(self._mapper.to_pc(r.t_ms), r.state) for r in reps]
 
+    def drain_beats(self) -> list[float]:
+        """Metronome beat times on the PC clock."""
+        out = []
+        while True:
+            try:
+                out.append(self._mapper.to_pc(self._beats.get_nowait()))
+            except queue.Empty:
+                return out
+
+    def cue_on(self, interval_ms: float) -> None:
+        self._send(f"CUE,ON,{clamp_interval(interval_ms)}")
+
+    def cue_off(self) -> None:
+        self._send("CUE,OFF")
+
+    def tempo(self, interval_ms: float) -> None:
+        self._send(f"TEMPO,{clamp_interval(interval_ms)}")
+
     def beep(self, n: int = 1) -> None:
         self._send(f"BEEP,{int(n)}")
 
@@ -391,6 +438,14 @@ class MockDevice:
         self.last_lcd = ("", "")
         self.last_led = "OFF"
         self._rx_times: deque = deque(maxlen=2000)
+        # metronome (rhythm coach): beats + a simulated patient answering them
+        self.cue = False
+        self._cue_interval = 0.6
+        self._cue_pending = 0.6
+        self._next_beat = math.inf
+        self._beats_out: list[float] = []
+        self._future_flips: list[float] = []
+        self.coach_patients: dict = {}
 
     @property
     def packets_per_sec(self) -> float:
@@ -399,6 +454,31 @@ class MockDevice:
 
     def measure_latency(self, timeout: float = 1.0) -> Optional[float]:
         return None          # nothing to measure in simulation
+
+    def _patient(self):
+        from rhythm_coach import SimulatedPatient
+        if self.sim_hand not in self.coach_patients:
+            mx = 2.6 if self.sim_hand == "Right" else 4.0
+            self.coach_patients[self.sim_hand] = SimulatedPatient(max_rate=mx, seed=11,
+                                                                  fatigue=0.1)
+        return self.coach_patients[self.sim_hand]
+
+    def cue_on(self, interval_ms: float) -> None:
+        self._cue_interval = self._cue_pending = clamp_interval(interval_ms) / 1000.0
+        self.cue = True
+        self._next_beat = self._clock()
+
+    def cue_off(self) -> None:
+        self.cue = False
+        self._next_beat = math.inf
+
+    def tempo(self, interval_ms: float) -> None:
+        self._cue_pending = clamp_interval(interval_ms) / 1000.0
+
+    def drain_beats(self) -> list[float]:
+        self._generate(self._clock())
+        out, self._beats_out = self._beats_out, []
+        return out
 
     def _rate(self, t: float) -> float:
         p = self.profiles.get(self.sim_hand, NORMAL_FLIPS)
@@ -419,6 +499,9 @@ class MockDevice:
         self._next_t = self._t0 + nxt
 
     def _generate(self, now: float) -> None:
+        if self.cue:
+            self._generate_cued(now)
+            return
         p = self.profiles.get(self.sim_hand, NORMAL_FLIPS)
         while self._streaming and self.flipping and self._next_t <= now:
             t = self._next_t
@@ -429,6 +512,23 @@ class MockDevice:
             else:
                 self._pending.append(SwitchEvent(t, self.state))
             self._schedule(t)
+
+    def _generate_cued(self, now: float) -> None:
+        patient = self._patient()
+        while self._next_beat <= now:
+            beat = self._next_beat
+            self._beats_out.append(beat)
+            if self._streaming and self.flipping:
+                flip = patient.respond(beat)
+                if flip is not None:
+                    self._future_flips.append(flip)
+            self._cue_interval = self._cue_pending          # TEMPO applies from the next beat
+            self._next_beat = beat + self._cue_interval
+        due = sorted(f for f in self._future_flips if f <= now)
+        self._future_flips = [f for f in self._future_flips if f > now]
+        for f in due:
+            self.state = 1 - self.state
+            self._pending.append(SwitchEvent(f, self.state))
 
     def start(self) -> None:
         self._pending = []
