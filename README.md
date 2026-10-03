@@ -17,8 +17,10 @@ Arduino tooling (portable, no admin needed):
 # put arduino-cli.exe on PATH (https://github.com/arduino/arduino-cli/releases), then:
 arduino-cli core update-index
 arduino-cli core install arduino:avr
-arduino-cli lib install "LiquidCrystal" "LiquidCrystal I2C" "Adafruit MPU6050"
+arduino-cli lib install "LiquidCrystal" "LiquidCrystal I2C"
 ```
+(The firmware reads the MPU6050 through raw I2C registers, so the Adafruit MPU6050 library
+is not needed — this also works with the many clone chips that Adafruit's `begin()` rejects.)
 Always run Python as `.venv\Scripts\python` (plain `python` may be a different version).
 
 ## 2. Wire (UNPLUG USB FIRST)
@@ -56,15 +58,19 @@ Close the app (or any serial monitor) before uploading — only one program can 
 .venv\Scripts\python app.py --sim              # no hardware: fake IMU + fake hand
 .venv\Scripts\python app.py --sim-device       # fake IMU + real webcam
 .venv\Scripts\python app.py --sim --seed-history   # add 7 days of fake history first
-.venv\Scripts\python app.py --seconds 5        # shorter tests
+.venv\Scripts\python app.py --seconds 5        # shorter tests (5-60 s)
 .venv\Scripts\python -m pytest                 # unit + app tests
 .venv\Scripts\python selftest.py --screens screenshots   # headless full session, PASS/FAIL table
 ```
 Keys: **SPACE** next · **R** restart (any screen) · **Q/ESC** quit · **H** trend (welcome/results) ·
 **T** toggle fake 5 Hz tremor (sim device only).
 
-If the Arduino is unplugged the header turns red and it reconnects automatically; a tremor test
-recorded while disconnected shows "-" with the reason instead of a score.
+Each test has a **Ready** screen (live camera / sensor preview) — press SPACE when positioned.
+
+If the Arduino is unplugged the header turns red and it reconnects automatically (LED, LCD and
+streaming are restored). A firmware `ERROR` (e.g. MPU6050 not responding) or a missing `READY`
+shows as an orange bar under the header. A tremor test with less than 80 % of the planned data
+shows "-" with the reason instead of a score.
 
 ## 5. Demo script (~3 min)
 1. Before the audience arrives: `app.py --seed-history` once (or `--sim --seed-history` as backup).
@@ -81,8 +87,11 @@ Backup: `app.py --sim`, press **T** during the right tremor test.
 
 ## Scoring (all in `scoring.py`, constants at the top)
 **Tremor** (MDS-UPDRS 3.17 style): subtract each axis' mean (gravity), detrend, Hann FFT per axis,
-sum power. Peak = max in 3–8 Hz; clear if ≥ 3× the median power in the band. Amplitude = sinusoid
-amplitude at the peak on the strongest axis; displacement = a/(2πf)² × 100 cm.
+sum power. Peak = max in 3–8 Hz; clear if ≥ 3× the median power in the band **and** a true local
+maximum (so leakage from movement just outside the band isn't counted). Amplitude = sinusoid
+amplitude on the strongest axis, measured as band-limited RMS within ±0.75 Hz of the peak
+(A = √2·RMS), so tremor that drifts in frequency isn't under-read; displacement = a/(2πf)² × 100 cm.
+Per spec only the strongest axis counts, so diagonal tremor reads up to ~30 % low.
 0: < 0.1 cm or no clear peak · 1: < 1 cm · 2: 1–3 cm · 3: 3–10 cm · 4: ≥ 10 cm.
 Also reports the % of 1-second windows showing tremor.
 
@@ -90,9 +99,13 @@ Also reports the % of 1-second windows showing tremor.
 opening is a tap. Problems: slow (< 2 taps/s), small (amplitude < 0.5), decrement > 30 % (first vs
 last 3 s), irregular (interval CV > 0.3), any hesitation (gap > 2× median).
 Score = number of problems (max 3); 4 if fewer than 5 taps. Hand visible < 50 % → not scored.
+If MediaPipe loses the hand for > 0.15 s, the tap intervals spanning that gap are ignored for
+rhythm/hesitations (a tracking dropout is not a patient hesitation) and a note is shown.
 
-**Asymmetry**: flagged if R/L differ by ≥ 1 point, or ≥ 25 % in taps/s or tremor displacement
-(displacement only compared once either side is ≥ 0.1 cm, so noise isn't flagged).
+**Asymmetry**: flagged if R/L differ by ≥ 1 point, or ≥ 25 % in taps/s or tremor displacement.
+The % is relative to the larger side (4.0 vs 3.0 taps/s = 25 %). Displacement only counts when
+there is a clear tremor peak and is only compared once either side is ≥ 0.1 cm; taps/s is only
+compared when both hands could be scored.
 
 ## Files
 | File | What |
@@ -104,4 +117,5 @@ Score = number of problems (max 3); 4 if fewer than 5 taps. Hand visible < 50 % 
 | `tapping_tracker.py` | `CameraHand` (MediaPipe), `FakeHand`, skeleton + graph drawing |
 | `history.py` | `sessions.csv`, `seed_history()`, trend chart |
 | `selftest.py` | headless full session with PASS/FAIL table |
+| `tools/gui_smoke.py` | scripted 60 s+ run of the real window with injected keys |
 | `firmware/neurocheck/neurocheck.ino` | Uno firmware; `firmware/compile_all.sh` builds all variants |
