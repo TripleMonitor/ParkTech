@@ -1,7 +1,7 @@
 """App state machine tests, headless, on a fake clock."""
 import pytest
 
-from app import KEY_SPACE, App, led_for
+from app import KEY_SPACE, TESTS, App, led_for
 from device import MockDevice
 from selftest import FakeClock, checks, run_session
 from tapping_tracker import FakeHand, HandFrame
@@ -35,7 +35,7 @@ def make_app(tmp_path, device=None, hands=None, seconds=2.0):
 
 def run_to_results(app, clock):
     drive(app, clock, KEY_SPACE)                 # welcome -> ready
-    for i in range(4):
+    for i in range(len(TESTS)):
         assert app.state == "ready"
         drive(app, clock, KEY_SPACE)             # ready -> countdown
         n = 0
@@ -69,38 +69,39 @@ def test_q_and_esc_quit(tmp_path):
 
 
 def test_partial_tremor_data_is_unscored(tmp_path):
-    """Arduino delivers only the first 2.5 s of a 10 s test (e.g. USB glitch)."""
-    clock = FakeClock()
+    """Hand only visible for the first part of the tremor test."""
+    class Vanishing(FakeHand):
+        def read(self, now, hand, detect, test="tapping"):
+            hf = super().read(now, hand, detect, test)
+            if test == "tremor" and now - self._t0 > 3.0:
+                return HandFrame(hf.frame, None, None)
+            return hf
 
-    class Glitchy(MockDevice):
-        def drain(self):
-            out = super().drain()
-            return [s for s in out if s.t_ms - self._start_ms < 2500]
-
-        def start(self):
-            super().start()
-            self._start_ms = self._now_ms()
-
-    dev = Glitchy(clock=clock)
-    dev.tremor_on = True
-    app, clock = make_app(tmp_path, device=dev, seconds=10.0)
-    dev._clock = clock
+    app, clock = make_app(tmp_path, hands=Vanishing(seed=0), seconds=10.0)
     run_to_results(app, clock)
     r = app.results[("tremor", "Right")].result
-    assert r.score is None and "of 10 s" in r.reasons[0]
+    assert r.score is None and r.reasons
+
+
+def test_stuck_flip_sensor_scores_4_with_sensor_check(tmp_path):
+    app, clock = make_app(tmp_path)
+    app.device.flipping = False
+    run_to_results(app, clock)
+    r = app.results[("flipping", "Left")].result
+    assert r.score == 4 and any("taped on" in s for s in r.reasons)
 
 
 def test_every_test_has_a_ready_screen(tmp_path):
     app, clock = make_app(tmp_path)
     seen = []
     drive(app, clock, KEY_SPACE)
-    for _ in range(4):
+    for _ in range(len(TESTS)):
         seen.append((app.state, app.test))
         drive(app, clock, KEY_SPACE)
         while app.state != "done":
             drive(app, clock)
         drive(app, clock, KEY_SPACE)
-    assert [s for s, _ in seen] == ["ready"] * 4
+    assert [s for s, _ in seen] == ["ready"] * len(TESTS)
 
 
 class DeadDevice(MockDevice):
@@ -118,15 +119,16 @@ def test_disconnected_arduino_does_not_crash(tmp_path):
     img = drive(app, clock)
     assert img.shape == (720, 1280, 3)
     run_to_results(app, clock)
-    r = app.results[("tremor", "Right")].result
+    r = app.results[("flipping", "Right")].result
     assert r.score is None and any("disconnected" in s for s in r.reasons)
+    assert app.results[("tremor", "Right")].result.score is not None   # camera still works
 
 
 class NoHand(FakeHand):
     ok = False
     status = "Camera 0 unavailable"
 
-    def read(self, now, hand, detect):
+    def read(self, now, hand, detect, test="tapping"):
         return HandFrame(None, None, None)
 
 
@@ -144,21 +146,31 @@ def test_led_mapping():
     assert led_for([None, None]) == "OFF"
 
 
-def test_t_toggles_fake_tremor(tmp_path):
+def test_t_and_f_sim_toggles(tmp_path):
     app, clock = make_app(tmp_path)
     drive(app, clock, ord("t"))
-    assert app.device.tremor_on is True
-    drive(app, clock, ord("t"))
-    assert app.device.tremor_on is False
+    assert app.hands.tremor_enabled is False
+    drive(app, clock, ord("f"))
+    assert app.device.flipping is False
 
 
 def test_ready_screen_has_no_stale_data_from_previous_test(tmp_path):
     app, clock = make_app(tmp_path)
-    app.device.tremor_on = True
     drive(app, clock, KEY_SPACE)
     drive(app, clock, KEY_SPACE)
     while app.state != "done":
         drive(app, clock)
-    assert app.samples                       # right-hand data present on the done screen
+    assert app.trem_lm                       # right-hand data present on the done screen
     drive(app, clock, KEY_SPACE)             # -> ready for the left hand
-    assert app.state == "ready" and app.samples == []
+    assert app.state == "ready" and app.trem_lm == []
+
+
+def test_flipping_calibration_uses_ready_state(tmp_path):
+    app, clock = make_app(tmp_path)
+    app.device.state = 1
+    drive(app, clock, KEY_SPACE)
+    while app.test[0] != "flipping":
+        drive(app, clock, KEY_SPACE if app.state in ("ready", "done") else -1)
+    assert app.state == "ready" and app._palm_down() is True
+    drive(app, clock, KEY_SPACE)
+    assert app.calib == app.device.state

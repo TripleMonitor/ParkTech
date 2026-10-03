@@ -101,11 +101,15 @@ class ClockMapper:
     def reset(self) -> None:
         self.offset = None
 
-    def to_pc(self, t_ms: float, received: float) -> float:
+    def observe(self, t_ms: float, received: float) -> None:
         cand = received - t_ms / 1000.0
         if self.offset is None or cand < self.offset:
             self.offset = cand
-        return t_ms / 1000.0 + self.offset
+
+    def to_pc(self, t_ms: float, received: Optional[float] = None) -> float:
+        if received is not None:
+            self.observe(t_ms, received)
+        return t_ms / 1000.0 + (self.offset or 0.0)
 
 
 class ArduinoDevice:
@@ -122,7 +126,7 @@ class ArduinoDevice:
         self._want_port = port
         self._clock = clock
         self.port = port or "?"
-        self._events: "queue.Queue[SwitchEvent]" = queue.Queue()
+        self._events: "queue.Queue[SwitchReport]" = queue.Queue()   # raw Arduino times
         self._writes: "queue.Queue[str]" = queue.Queue(maxsize=WRITE_QUEUE_MAX)
         self._ser = None
         self._ser_lock = threading.Lock()
@@ -222,8 +226,9 @@ class ArduinoDevice:
             rep = parse_line(raw)
             if rep is not None:
                 self.state = rep.state
+                self._mapper.observe(rep.t_ms, received)
                 if self._events.qsize() < MAX_BUFFER:
-                    self._events.put(SwitchEvent(self._mapper.to_pc(rep.t_ms, received), rep.state))
+                    self._events.put(rep)
                 continue
             text = raw.decode("ascii", errors="ignore").strip()
             if text.startswith("ERROR"):
@@ -289,12 +294,15 @@ class ArduinoDevice:
         self._send("STATE")
 
     def drain(self) -> list[SwitchEvent]:
-        out = []
+        """Events on the PC clock. The whole batch uses the current best offset, so
+        intervals between events are exact Arduino-millisecond differences."""
+        reps = []
         while True:
             try:
-                out.append(self._events.get_nowait())
+                reps.append(self._events.get_nowait())
             except queue.Empty:
-                return out
+                break
+        return [SwitchEvent(self._mapper.to_pc(r.t_ms), r.state) for r in reps]
 
     def beep(self, n: int = 1) -> None:
         self._send(f"BEEP,{int(n)}")

@@ -15,6 +15,7 @@ DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session
 FIELDS = ["timestamp", "seeded",
           "tremor_R", "tremor_L", "tremor_R_cm", "tremor_L_cm", "tremor_R_hz", "tremor_L_hz",
           "tap_R", "tap_L", "tap_R_rate", "tap_L_rate", "tap_R_amp", "tap_L_amp",
+          "flip_R", "flip_L", "flip_R_rate", "flip_L_rate",
           "asymmetry"]
 
 
@@ -64,7 +65,8 @@ def seed_history(path: str = DEFAULT_PATH, days: int = 7,
     if not force and any(r.get("seeded") == "1" for r in load_sessions(path)):
         log.info("%s already has seeded sessions - not adding more", path)
         return []
-    from scoring import score_tapping, score_tremor
+    from flipping_analysis import FlippingFeatures
+    from scoring import score_flipping, score_tapping, score_tremor
     from tapping_analysis import TappingFeatures
     from tremor_analysis import TremorFeatures
 
@@ -73,16 +75,21 @@ def seed_history(path: str = DEFAULT_PATH, days: int = 7,
     for i in range(days):
         k = i / max(1, days - 1)                       # 0 -> 1 over the week
         when = (now - timedelta(days=days - i)).replace(hour=10, minute=0, second=0, microsecond=0)
-        sides = {"R": (0.3 + 1.5 * k, 3.4 - 1.6 * k, 0.95 - 0.4 * k),
-                 "L": (0.05, 3.5, 0.95)}
+        sides = {"R": (0.3 + 1.5 * k, 3.4 - 1.6 * k, 0.95 - 0.4 * k, 2.4 - 1.1 * k),
+                 "L": (0.05, 3.5, 0.95, 2.4)}
         row = {"timestamp": when.isoformat(timespec="seconds"), "seeded": 1}
-        for side, (cm, rate, amp) in sides.items():
-            tf = TremorFeatures(True, 10.0, 5.0, 0.0, cm, cm >= 0.1, 10.0, 80.0)
+        for side, (cm, rate, amp, flips) in sides.items():
+            clear = cm >= 0.1
+            tf = TremorFeatures(True, 10.0, 1.0, 0.06, 5.0, cm, clear, 10.0, 80.0)
             pf = TappingFeatures(int(rate * 10), rate, amp, 0.1 + 0.3 * k * (side == "R"),
                                  0.1, 0, 1.0, 10.0)
-            row.update({f"tremor_{side}": score_tremor(tf).score, f"tremor_{side}_cm": cm,
-                        f"tremor_{side}_hz": 5.0, f"tap_{side}": score_tapping(pf).score,
-                        f"tap_{side}_rate": rate, f"tap_{side}_amp": amp})
+            ff = FlippingFeatures(int(flips * 20), int(flips * 10), flips, 0.1,
+                                  0.35 * k * (side == "R"), 0, 10.0, 0.3)
+            row.update({f"tremor_{side}": score_tremor(tf).score,
+                        f"tremor_{side}_cm": cm if clear else 0.0, f"tremor_{side}_hz": 5.0,
+                        f"tap_{side}": score_tapping(pf).score,
+                        f"tap_{side}_rate": rate, f"tap_{side}_amp": amp,
+                        f"flip_{side}": score_flipping(ff).score, f"flip_{side}_rate": flips})
         rows.append(save_session(row, path))
     return rows
 
@@ -102,18 +109,20 @@ def _when(row: dict, i: int) -> datetime:
 
 
 def trend_image(sessions: list[dict], width: int = 1280, height: int = 720) -> np.ndarray:
-    """2x2 trend chart (scores + raw values, R vs L). Returns BGR uint8 (height, width, 3)."""
+    """2x3 trend chart (scores + raw values, R vs L). Returns BGR uint8 (height, width, 3)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
 
     dpi = 100
-    fig, axes = plt.subplots(2, 2, figsize=(width / dpi, height / dpi), dpi=dpi)
+    fig, axes = plt.subplots(2, 3, figsize=(width / dpi, height / dpi), dpi=dpi)
     panels = [("tremor_{}", "Tremor score (0-4)", (-0.3, 4.3)),
-              ("tap_{}", "Tapping score (0-4)", (-0.3, 4.3)),
+              ("tap_{}", "Finger tapping score (0-4)", (-0.3, 4.3)),
+              ("flip_{}", "Hand flipping score (0-4)", (-0.3, 4.3)),
               ("tremor_{}_cm", "Tremor amplitude (cm)", None),
-              ("tap_{}_rate", "Taps per second", None)]
+              ("tap_{}_rate", "Taps per second", None),
+              ("flip_{}_rate", "Full flips per second", None)]
     xs = [_when(s, i) for i, s in enumerate(sessions)]
     for ax, (key, title, ylim) in zip(axes.flat, panels):
         for side, style, colour in (("R", "o-", "#d62728"), ("L", "s--", "#1f77b4")):
@@ -122,7 +131,7 @@ def trend_image(sessions: list[dict], width: int = 1280, height: int = 720) -> n
             if pts:
                 ax.plot(*zip(*pts), style, color=colour, lw=2, ms=6,
                         label="Right" if side == "R" else "Left")
-        ax.set_title(title, fontsize=13)
+        ax.set_title(title, fontsize=12)
         if ylim:
             ax.set_ylim(*ylim)
             ax.set_yticks(range(5))
@@ -133,7 +142,7 @@ def trend_image(sessions: list[dict], width: int = 1280, height: int = 720) -> n
         ax.xaxis.set_major_locator(locator)
         ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
         if ax.get_legend_handles_labels()[0]:
-            ax.legend(loc="upper left", fontsize=10)
+            ax.legend(loc="best", fontsize=9)
     if not sessions:
         fig.text(0.5, 0.5, "No sessions yet - run one, or start with --seed-history",
                  ha="center", fontsize=18)

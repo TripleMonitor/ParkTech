@@ -1,7 +1,7 @@
-"""Hand sources for the tapping test + drawing helpers.
+"""Hand sources for the camera tests (tremor + finger tapping) + drawing helpers.
 
 CameraHand: webcam + MediaPipe Hands.  FakeHand: synthetic landmarks for --sim.
-Both implement:  read(now, hand, detect) -> HandFrame,  reset(now),  close().
+Both implement:  read(now, hand, detect, test) -> HandFrame,  reset(now),  close().
 The frame is mirrored (selfie view) so MediaPipe's Left/Right label matches the user.
 """
 from __future__ import annotations
@@ -55,7 +55,7 @@ class CameraHand:
     def reset(self, now: float) -> None:
         pass
 
-    def read(self, now: float, hand: str, detect: bool) -> HandFrame:
+    def read(self, now: float, hand: str, detect: bool, test: str = "tapping") -> HandFrame:
         if not self.ok:
             return HandFrame(None, None, None)
         ok, raw = self._cap.read()
@@ -105,15 +105,35 @@ _PINCH = np.array([250.0, 285.0])
 _SCALE = 150.0
 
 
+# Open palm facing the camera (tremor test): fingers spread, wrist->middle-MCP = 150 px.
+_PALM = np.array([
+    (320, 430), (270, 400), (235, 360), (210, 325), (190, 295),   # wrist, thumb
+    (280, 290), (270, 230), (265, 195), (262, 165),               # index
+    (320, 280), (320, 215), (320, 175), (320, 140),               # middle
+    (360, 290), (370, 232), (375, 197), (378, 168),               # ring
+    (395, 310), (410, 265), (418, 238), (424, 212)], float)
+_TREMOR_DIR = np.array([np.cos(np.radians(20)), np.sin(np.radians(20))])
+_PX_PER_CM = _SCALE / 9.0      # tremor_analysis assumes wrist->middle-MCP = 9 cm
+
+
 class FakeHand:
-    """Synthetic tapping hand. Profiles per hand, e.g. {"Right": IMPAIRED, "Left": NORMAL}."""
+    """Synthetic hand for --sim.
+
+    tapping: per-hand TapProfile, e.g. {"Right": IMPAIRED, "Left": NORMAL}.
+    tremor:  palm held still with a `tremor_hz` oscillation of tremor_cm[hand] cm
+             (toggle all tremor with `tremor_enabled`), plus +/-1.5 px landmark jitter.
+    """
 
     status = "Simulated hand"
     ok = True
 
     def __init__(self, profiles: Optional[dict] = None, seed: Optional[int] = None,
-                 test_seconds: float = 10.0):
+                 test_seconds: float = 10.0, tremor_cm: Optional[dict] = None,
+                 tremor_hz: float = 5.0):
         self.profiles = dict(profiles or {"Right": IMPAIRED, "Left": NORMAL})
+        self.tremor_cm = dict(tremor_cm if tremor_cm is not None else {"Right": 1.5, "Left": 0.0})
+        self.tremor_hz = tremor_hz
+        self.tremor_enabled = True
         self._rng = random.Random(seed)
         self._seconds = test_seconds
         self._t0 = 0.0
@@ -142,11 +162,19 @@ class FakeHand:
         pts[3] = (pts[2] + pts[4]) / 2
         return pts
 
-    def read(self, now: float, hand: str, detect: bool) -> HandFrame:
+    def palm_at(self, now: float, hand: str) -> np.ndarray:
+        cm = self.tremor_cm.get(hand, 0.0) if self.tremor_enabled else 0.0
+        shift = _TREMOR_DIR * cm * _PX_PER_CM * math.sin(2 * math.pi * self.tremor_hz * now)
+        jitter = np.array([[self._rng.uniform(-1.5, 1.5) for _ in range(2)] for _ in range(21)])
+        return _PALM + shift + jitter
+
+    def read(self, now: float, hand: str, detect: bool, test: str = "tapping") -> HandFrame:
         frame = np.full((480, 640, 3), (60, 50, 45), np.uint8)
         cv2.putText(frame, "SIMULATED HAND (--sim)", (20, 460), FONT, 0.6, GREY, 1, cv2.LINE_AA)
         if not detect:
             return HandFrame(frame, None, None)
+        if test == "tremor":
+            return HandFrame(frame, self.palm_at(now, hand), hand)
         return HandFrame(frame, self.landmarks_for(self.distance_at(now, hand)), hand)
 
     def close(self) -> None:
@@ -154,10 +182,27 @@ class FakeHand:
 
 
 # --- drawing -------------------------------------------------------------------------------
-def draw_hand(frame: np.ndarray, hf: HandFrame, expected_hand: str) -> None:
-    """Skeleton, thumb-index line and distance, drawn onto `frame` in place."""
+def draw_hand(frame: np.ndarray, hf: HandFrame, expected_hand: str, test: str = "tapping") -> None:
+    """Skeleton plus the test's key landmarks, drawn onto `frame` in place.
+
+    tapping: thumb-index line and normalised distance.  tremor: index fingertip ring.
+    """
     if hf.landmarks is None:
         cv2.putText(frame, "Show your hand to the camera", (20, 40), FONT, 0.9, RED, 2, cv2.LINE_AA)
+        return
+    if test == "tremor":
+        pts = hf.landmarks.astype(int)
+        for a, b in HAND_CONNECTIONS:
+            cv2.line(frame, tuple(pts[a]), tuple(pts[b]), WHITE, 2, cv2.LINE_AA)
+        for p in pts:
+            cv2.circle(frame, tuple(p), 4, ACCENT, -1, cv2.LINE_AA)
+        cv2.circle(frame, tuple(pts[INDEX_TIP]), 12, YELLOW, 2, cv2.LINE_AA)
+        cv2.line(frame, tuple(pts[WRIST]), tuple(pts[MIDDLE_MCP]), GREEN, 2, cv2.LINE_AA)
+        cv2.putText(frame, "9 cm", tuple(((pts[WRIST] + pts[MIDDLE_MCP]) // 2) + (8, 0)), FONT,
+                    0.55, GREEN, 1, cv2.LINE_AA)
+        if hf.label and hf.label.lower() != expected_hand.lower():
+            cv2.putText(frame, f"That looks like your {hf.label.upper()} hand", (20, 40), FONT,
+                        0.8, YELLOW, 2, cv2.LINE_AA)
         return
     pts = hf.landmarks.astype(int)
     for a, b in HAND_CONNECTIONS:

@@ -1,13 +1,15 @@
-"""NeuroCheck - 1-minute Parkinson's motor check station (hackathon demo).
+"""NeuroCheck - Parkinson's motor check station (hackathon demo).
 
 TRACKING / DECISION-SUPPORT TOOL, NOT A DIAGNOSIS. All thresholds are demo thresholds.
+Tests per hand: rest tremor (webcam), finger tapping (webcam), hand flipping (SW-520D tilt switch).
 
   python app.py                 real Arduino (auto-detect port) + webcam
   python app.py --sim           MockDevice + FakeHand: no hardware at all
   python app.py --sim-device    MockDevice + real webcam
   python app.py --seed-history  add 7 days of fake sessions first (for the trend demo)
 
-Keys: SPACE next   R restart   Q/ESC quit   H trend   T toggle fake tremor (sim device)
+Keys: SPACE next   R restart   Q/ESC quit   H trend
+      sim only: T toggle fake tremor   F toggle fake flip sensor (stuck)
 """
 from __future__ import annotations
 
@@ -23,34 +25,44 @@ import numpy as np
 
 import history
 import ui
-from scoring import (ScoreResult, score_tapping, score_tremor, tapping_asymmetry,
-                     tremor_asymmetry)
+from flipping_analysis import FlippingFeatures, analyze_flipping, debounce
+from scoring import (ScoreResult, flipping_asymmetry, score_flipping, score_tapping, score_tremor,
+                     tapping_asymmetry, tremor_asymmetry)
 from tapping_analysis import TappingFeatures, analyze_tapping, detect_taps
 from tapping_tracker import HandFrame, draw_distance_graph, draw_hand
-from tremor_analysis import TremorFeatures, analyze_samples, effective_displacement_cm
+from tremor_analysis import (HAND_LENGTH_CM, INDEX_TIP, MIDDLE_MCP, WRIST, TremorFeatures,
+                             analyze_tremor, effective_displacement_cm)
 
 log = logging.getLogger("neurocheck")
 
 COUNTDOWN_S = 3
 WINDOW = "NeuroCheck"
-TESTS = (("tremor", "Right"), ("tremor", "Left"), ("tapping", "Right"), ("tapping", "Left"))
+TESTS = (("tremor", "Right"), ("tremor", "Left"), ("tapping", "Right"), ("tapping", "Left"),
+         ("flipping", "Right"), ("flipping", "Left"))
 INSTRUCTIONS = {
-    "tremor": ["Sensor on your {hand} wrist.", "Rest the forearm on the table,",
-               "let the hand relax. Keep still."],
+    "tremor": ["Hold your {hand} hand up, palm facing", "the camera, fingers spread.",
+               "Relax and keep it as still as you can."],
     "tapping": ["Hold your {hand} hand up to the camera.", "Tap index finger on thumb",
                 "as FAST and as BIG as you can."],
+    "flipping": ["Tilt sensor taped to the back of your", "{hand} hand. Hold it PALM-DOWN now.",
+                 "Then flip palm-up / palm-down", "as FAST and as FULLY as you can."],
 }
-TITLES = {"tremor": "Rest tremor (3.17)", "tapping": "Finger tapping (3.4)"}
+TITLES = {"tremor": "Rest tremor (3.17)", "tapping": "Finger tapping (3.4)",
+          "flipping": "Hand flipping (3.6)"}
+LCD_SHORT = {"tremor": "tr", "tapping": "tap", "flipping": "fl"}
+CAMERA_NOTE = "Camera tremor: may miss very small tremors (< ~0.5 cm)"
+SENSOR_STUCK = "Sensor not flipping - check it's taped on and upright"
 DISCLAIMER = "Demo thresholds - tracking aid, NOT a diagnosis"
 KEY_SPACE, KEY_ENTER, KEY_ESC = 32, 13, 27
-LIVE_TAP_EVERY_S = 0.25
+LIVE_EVERY_S = 0.25
+STUCK_AFTER_S = 3.0
 
 
 @dataclass(frozen=True)
 class TestResult:
     kind: str
     hand: str
-    features: object                    # TremorFeatures | TappingFeatures
+    features: object                    # TremorFeatures | TappingFeatures | FlippingFeatures
     result: ScoreResult
     image: Optional[np.ndarray] = None  # spectrum for tremor
 
@@ -62,6 +74,14 @@ def led_for(scores: list[Optional[int]]) -> str:
         return "OFF"
     worst = max(real)
     return "G" if worst <= 1 else "Y" if worst == 2 else "R"
+
+
+def fingertip_cm(lm: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """Live-view only: fingertip position in cm using this frame's hand length."""
+    if lm is None:
+        return None
+    hand_px = float(np.linalg.norm(lm[WRIST] - lm[MIDDLE_MCP]))
+    return None if hand_px < 1e-6 else lm[INDEX_TIP] * HAND_LENGTH_CM / hand_px
 
 
 class App:
@@ -79,16 +99,26 @@ class App:
         self.state, self.idx, self.t_state = "welcome", 0, now
         self.results: dict[tuple[str, str], TestResult] = {}
         self.flags: list[str] = []
-        self.samples: list = []
-        self.tap_t: list[float] = []
-        self.tap_d: list[Optional[float]] = []
-        self.live_taps, self._live_at = 0, 0.0
-        self.hf = HandFrame(None, None, None)
+        self._clear_live()
         self.trend_img: Optional[np.ndarray] = None
         self.save_msg = ""
         self.last_beep = 0
         self.device.led("OFF")
         self.device.lcd("NeuroCheck", "Press SPACE")
+
+    def _clear_live(self) -> None:
+        self.hf = HandFrame(None, None, None)
+        self.trem_t: list[float] = []
+        self.trem_lm: list[Optional[np.ndarray]] = []
+        self.trem_xy: list[Optional[np.ndarray]] = []
+        self.tap_t: list[float] = []
+        self.tap_d: list[Optional[float]] = []
+        self.live_taps, self._live_at = 0, 0.0
+        self.events: list = []
+        self.calib: Optional[int] = None
+        self.flip_times: list[float] = []
+        self.rec_start = 0.0
+        self.device_lost = False
 
     @property
     def test(self) -> tuple[str, str]:
@@ -104,44 +134,51 @@ class App:
     def _enter_ready(self, now: float) -> None:
         """Ready screen for self.test: fresh live views (no data from the previous test)."""
         self._goto("ready", now)
-        self.samples, self.tap_t, self.tap_d = [], [], []
-        self.hf = HandFrame(None, None, None)
+        self._clear_live()
         self._lcd_test("SPACE to start")
+        if self.test[0] == "flipping":
+            self._lcd_test("Palm DOWN, SPACE")
+            self.device.request_state()       # calibration: current state = palm-down
 
     def _begin_countdown(self, now: float) -> None:
+        kind, hand = self.test
         self._goto("countdown", now)
         self.last_beep = 0
-        self.samples, self.tap_t, self.tap_d = [], [], []
-        self.live_taps = 0
+        if kind == "flipping":
+            self.calib = self.device.state     # palm-down reference (None if no reply yet)
+            if hasattr(self.device, "sim_hand"):
+                self.device.sim_hand = hand
         self.hands.reset(now + COUNTDOWN_S)
 
     def _begin_recording(self, now: float) -> None:
         self._goto("recording", now)
+        self.rec_start = self.clock()
         self._lcd_test("Recording...")
         if self.test[0] == "tremor":
+            self.trem_t, self.trem_xy, self.trem_lm = [], [], []    # drop preview frames
+        if self.test[0] == "flipping":
             self.device.start()
 
     def _finish_test(self, now: float) -> None:
         kind, hand = self.test
         self.device.beep(2)            # done beep first: rendering below can take ~0.2 s
         if kind == "tremor":
-            self.device.stop()
-            self.samples.extend(self.device.drain())
             self.results[self.test] = self._tremor_result(hand)
-        else:
+        elif kind == "tapping":
             self.results[self.test] = self._tapping_result(hand)
+        else:
+            self.device.stop()
+            self.events.extend(self.device.drain())
+            self.results[self.test] = self._flipping_result(hand)
         score = self.results[self.test].result.score
         self._lcd_test(f"Score {'-' if score is None else score}")
         self._goto("done", now)
 
     def _tremor_result(self, hand: str) -> TestResult:
-        f = analyze_samples(self.samples)
+        f = analyze_tremor(self.trem_t, self.trem_lm)
         r = score_tremor(f, expected_s=self.seconds)
-        if r.score is None:
-            if not self.device.connected:
-                r = ScoreResult(None, r.reasons + [self.device.status])
-            elif getattr(self.device, "warning", ""):
-                r = ScoreResult(None, r.reasons + [self.device.warning])
+        if r.score is None and not self.hands.ok:
+            r = ScoreResult(None, r.reasons + [self.hands.status])
         img = None
         try:
             img = ui.spectrum_image(f.freqs, f.power, f.peak_hz, f.displacement_cm,
@@ -158,11 +195,26 @@ class App:
             r = ScoreResult(None, r.reasons + [self.hands.status])
         return TestResult("tapping", hand, f, r)
 
+    def _flipping_features(self) -> FlippingFeatures:
+        return analyze_flipping([e.t for e in self.events], [e.state for e in self.events],
+                                self.rec_start, self.seconds, initial_state=self.calib)
+
+    def _flipping_result(self, hand: str) -> TestResult:
+        f = self._flipping_features()
+        if self.device_lost or not self.device.connected:
+            r = ScoreResult(None, ["Arduino disconnected during the test - repeat",
+                                   self.device.status])
+        else:
+            r = score_flipping(f)
+            if f.half_flips == 0 and getattr(self.device, "warning", ""):
+                r = ScoreResult(r.score, r.reasons + [self.device.warning])
+        return TestResult("flipping", hand, f, r)
+
     def _enter_results(self, now: float) -> None:
         self._goto("results", now)
         self.flags = self._asymmetry()
         self.device.led(led_for([r.result.score for r in self.results.values()]))
-        self.device.lcd(self._lcd_scores("tremor", "Tremor"), self._lcd_scores("tapping", "Tap"))
+        self.device.lcd(self._lcd_scores("Right"), self._lcd_scores("Left"))
         try:
             history.save_session(self._session_row(), self.history_path)
             self.save_msg = f"Saved to {self.history_path}"
@@ -179,15 +231,18 @@ class App:
             log.exception("trend render failed")
             self.trend_img = None
 
-    def _lcd_scores(self, kind: str, label: str) -> str:
-        def s(hand: str) -> str:
+    def _lcd_scores(self, hand: str) -> str:
+        parts = []
+        for kind in ("tremor", "tapping", "flipping"):
             r = self.results.get((kind, hand))
-            return "-" if r is None or r.result.score is None else str(r.result.score)
-        return f"{label} R{s('Right')} L{s('Left')}"
+            s = "-" if r is None or r.result.score is None else str(r.result.score)
+            parts.append(f"{LCD_SHORT[kind]}{s}")
+        return f"{hand[0]} " + " ".join(parts)          # e.g. "R tr2 tap1 fl3"
 
     def _asymmetry(self) -> list[str]:
         flags: list[str] = []
-        for kind, fn in (("tremor", tremor_asymmetry), ("tapping", tapping_asymmetry)):
+        for kind, fn in (("tremor", tremor_asymmetry), ("tapping", tapping_asymmetry),
+                         ("flipping", flipping_asymmetry)):
             r, l = self.results.get((kind, "Right")), self.results.get((kind, "Left"))
             if r and l:
                 flags.extend(fn(r.features, l.features, r.result, l.result))
@@ -204,6 +259,10 @@ class App:
             elif isinstance(f, TappingFeatures):
                 row.update({f"tap_{side}": tr.result.score,
                             f"tap_{side}_rate": f.taps_per_sec, f"tap_{side}_amp": f.mean_amplitude})
+            elif isinstance(f, FlippingFeatures):
+                ok = tr.result.score is not None
+                row.update({f"flip_{side}": tr.result.score,
+                            f"flip_{side}_rate": f.flips_per_sec if ok else None})
         return row
 
     # ---------------------------------------------------------------- input
@@ -217,8 +276,10 @@ class App:
             self.running = False
         elif ch == "r":
             self.restart(now)
-        elif ch == "t" and hasattr(self.device, "tremor_on"):
-            self.device.tremor_on = not self.device.tremor_on
+        elif ch == "t" and hasattr(self.hands, "tremor_enabled"):
+            self.hands.tremor_enabled = not self.hands.tremor_enabled
+        elif ch == "f" and hasattr(self.device, "flipping"):
+            self.device.flipping = not self.device.flipping
         elif ch == "h" and self.state in ("welcome", "results"):
             self._enter_trend(now)
         elif not go:
@@ -252,28 +313,57 @@ class App:
             if elapsed >= COUNTDOWN_S:
                 self._begin_recording(now)
                 elapsed = 0.0
-        if self.state == "recording" and kind == "tremor":
-            self.samples.extend(self.device.drain())
 
         active = self.state in ("ready", "countdown", "recording")
-        if kind == "tapping" and active:
-            self.hf = self.hands.read(now, hand, detect=True)
-            if self.state == "recording":
-                self.tap_t.append(self.clock())     # stamp after the (blocking) camera read
+        recording = self.state == "recording"
+        if active and kind in ("tremor", "tapping"):
+            self.hf = self.hands.read(now, hand, detect=True, test=kind)
+            t_frame = self.clock()                   # stamp after the (blocking) camera read
+            if kind == "tremor":
+                self.trem_xy.append(fingertip_cm(self.hf.landmarks))
+                self.trem_t.append(t_frame)
+                if recording:
+                    self.trem_lm.append(self.hf.landmarks)
+                else:                                # preview only: keep the last 3 s
+                    self.trem_t, self.trem_xy = self.trem_t[-120:], self.trem_xy[-120:]
+            elif recording:
+                self.tap_t.append(t_frame)
                 self.tap_d.append(self.hf.distance)
                 self._update_live_taps(now)
+        if kind == "flipping" and active:
+            if recording:
+                self.events.extend(self.device.drain())
+                self.device_lost |= not self.device.connected
+                self._update_live_flips(now)
+            else:
+                self.device.drain()                  # discard stray reports before START
 
-        if self.state == "recording" and elapsed >= self.seconds:
+        if recording and elapsed >= self.seconds:
             self._finish_test(now)
 
     def _update_live_taps(self, now: float) -> None:
-        if now - self._live_at < LIVE_TAP_EVERY_S:
+        if now - self._live_at < LIVE_EVERY_S:
             return
         self._live_at = now
         valid = [(t, d) for t, d in zip(self.tap_t, self.tap_d) if d is not None]
         if len(valid) >= 10:
             t, d = np.array(valid, dtype=float).T
             self.live_taps = len(detect_taps(t, d)[0])
+
+    def _update_live_flips(self, now: float) -> None:
+        changes = debounce([e.t for e in self.events], [e.state for e in self.events],
+                           self.calib)
+        self.flip_times = [t - self.rec_start for t, _ in changes if t >= self.rec_start]
+
+    def _palm_down(self) -> Optional[bool]:
+        """Ready: the patient is told to hold palm-down, so the current state IS palm-down.
+        Afterwards: compare with the state captured when SPACE was pressed."""
+        state = self.device.state
+        if state is None:
+            return None
+        if self.state == "ready":
+            return True
+        return None if self.calib is None else state == self.calib
 
     def tick(self, key: int, now: float) -> np.ndarray:
         self.handle_key(key, now)
@@ -288,13 +378,19 @@ class App:
         c = ui.blank()
         self._draw_header(c)
         getattr(self, f"_draw_{self.state}")(c, now)
+        self._draw_footer(c)
+        return c
+
+    def _draw_footer(self, c, hints: Optional[str] = None) -> None:
         ui.panel(c, 0, ui.H - 36, ui.W, 36)
         ui.text(c, DISCLAIMER, (20, ui.H - 12), 0.55, ui.WARN)
-        hints = "SPACE next   R restart   H trend   Q quit"
-        if hasattr(self.device, "tremor_on"):
-            hints = "T fake tremor   " + hints
+        if hints is None:
+            hints = "SPACE next   R restart   H trend   Q quit"
+            sim = [k for k, ok in (("T tremor", hasattr(self.hands, "tremor_enabled")),
+                                   ("F stuck sensor", hasattr(self.device, "flipping"))) if ok]
+            if sim:
+                hints = "sim: " + "  ".join(sim) + "   |   " + hints
         ui.text(c, hints, (ui.W - 20 - ui.text_width(hints, 0.5), ui.H - 12), 0.5, ui.GREY)
-        return c
 
     def _draw_header(self, c) -> None:
         ui.panel(c, 0, 0, ui.W, 56)
@@ -302,11 +398,9 @@ class App:
         ui.text(c, "Parkinson's motor check station", (262, 37), 0.6, ui.GREY)
         dev = self.device
         status = dev.status
-        if hasattr(dev, "tremor_on"):
-            status += f"  |  fake tremor {'ON' if dev.tremor_on else 'off'}"
+        if hasattr(self.hands, "tremor_enabled"):
+            status += f"  |  fake tremor {'ON' if self.hands.tremor_enabled else 'off'}"
         colour = ui.OK if dev.connected else ui.REC
-        if hasattr(dev, "tremor_on") and dev.tremor_on:
-            colour = ui.WARN
         ui.text(c, status, (ui.W - 20 - ui.text_width(status, 0.55), 36), 0.55, colour)
         if not dev.connected:
             ui.panel(c, 0, 56, ui.W, 30, (40, 40, 150))
@@ -316,39 +410,55 @@ class App:
             ui.centred(c, f"Arduino: {dev.warning}", 78, 0.6, ui.WHITE)
 
     def _draw_welcome(self, c, now) -> None:
-        ui.centred(c, "1-minute motor check", 200, 1.8, ui.WHITE, 2)
+        ui.centred(c, "Motor check: 3 tests per hand", 175, 1.6, ui.WHITE, 2)
         for i, (kind, hand) in enumerate(TESTS):
-            ui.text(c, f"{i + 1}.  {hand} hand {kind}", (430, 290 + i * 46), 0.95, ui.WHITE)
-            ui.text(c, f"{self.seconds:g} s", (900, 290 + i * 46), 0.95, ui.GREY)
-        ui.centred(c, "Press SPACE to begin", 530, 1.1, ui.ACCENT, 2)
-        ui.centred(c, "H: history trend", 575, 0.65, ui.GREY)
+            y = 245 + i * 42
+            ui.text(c, f"{i + 1}.  {hand} hand {kind}", (400, y), 0.9, ui.WHITE)
+            ui.text(c, f"{self.seconds:g} s", (880, y), 0.9, ui.GREY)
+        ui.centred(c, "Press SPACE to begin", 560, 1.1, ui.ACCENT, 2)
+        ui.centred(c, "H: history trend", 605, 0.65, ui.GREY)
 
     def _test_title(self, c) -> None:
         kind, hand = self.test
-        ui.text(c, f"Test {self.idx + 1}/4", (20, 112), 0.8, ui.GREY)
+        ui.text(c, f"Test {self.idx + 1}/{len(TESTS)}", (20, 112), 0.8, ui.GREY)
         ui.text(c, f"{hand.upper()} hand {kind}", (150, 112), 1.1, ui.WHITE, 2)
 
-    def _draw_left_live(self, c, now) -> None:
+    def _draw_camera(self, c) -> None:
         kind, hand = self.test
-        if kind == "tremor":
-            ui.accel_chart(c, self.samples, 20, 135, 720, 520)
-            if hasattr(self.device, "tremor_on") and self.state != "recording":
-                ui.text(c, "Sim: press T to toggle a fake 5 Hz tremor", (40, 630), 0.6, ui.WARN)
-            return
         frame = self.hf.frame
         if frame is None:
             ui.panel(c, 20, 135, 720, 520)
             ui.centred(c, self.hands.status, 380, 0.9, ui.REC, 1, 20, 740)
             return
         frame = frame.copy()
-        draw_hand(frame, self.hf, hand)
+        draw_hand(frame, self.hf, hand, test=kind)
         ui.paste(c, frame, 20, 135, 693, 520)
+
+    def _draw_left_live(self, c, now) -> None:
+        kind, _ = self.test
+        if kind == "flipping":
+            ui.flip_indicator(c, self._palm_down(), 20, 135, 720, 300)
+            if self.state == "ready":
+                ui.centred(c, "Calibrating: hold your hand PALM-DOWN", 480, 0.8, ui.WARN, 1, 20, 740)
+                ui.centred(c, f"switch reads {self.device.state if self.device.state is not None else '?'}",
+                           515, 0.6, ui.GREY, 1, 20, 740)
+            else:
+                elapsed = (self.clock() - self.rec_start) if self.state == "recording" else None
+                ui.flip_timeline(c, self.flip_times, self.seconds, elapsed, 20, 455, 720, 110)
+                if self.state == "recording" and elapsed is not None and \
+                        elapsed > STUCK_AFTER_S and not self.flip_times:
+                    ui.panel(c, 20, 580, 720, 40, (40, 40, 150))
+                    ui.centred(c, SENSOR_STUCK, 607, 0.65, ui.WHITE, 1, 20, 740)
+            return
+        self._draw_camera(c)
+        if kind == "tremor":
+            ui.text(c, CAMERA_NOTE, (30, 645), 0.5, ui.WARN)
 
     def _draw_right_column(self, c, big: str, sub: str, colour) -> None:
         kind, hand = self.test
         x = 770
         for i, line in enumerate(INSTRUCTIONS[kind]):
-            ui.text(c, line.format(hand=hand.upper()), (x, 165 + i * 36), 0.72)
+            ui.text(c, line.format(hand=hand.upper()), (x, 160 + i * 32), 0.66)
         ui.text(c, big, (x, 345), 3.0 if len(big) <= 2 else 2.0, colour, 4)
         ui.text(c, sub, (x, 395), 0.8, ui.GREY)
 
@@ -364,6 +474,7 @@ class App:
         self._draw_right_column(c, str(n), "Get ready...", ui.ACCENT)
 
     def _draw_recording(self, c, now) -> None:
+        kind, _ = self.test
         self._test_title(c)
         self._draw_left_live(c, now)
         left = max(0.0, self.seconds - (now - self.t_state))
@@ -371,16 +482,21 @@ class App:
         frac = min(1.0, 1 - left / self.seconds)
         ui.panel(c, 770, 420, 490, 22)
         cv2.rectangle(c, (770, 420), (770 + int(490 * frac), 442), ui.REC, -1)
-        if self.test[0] == "tapping":
-            draw_distance_graph(c, self.tap_t, self.tap_d, now, 770, 465, 490, 150)
+        if kind == "tapping":
+            draw_distance_graph(c, self.tap_t, self.tap_d, self.clock(), 770, 465, 490, 150)
             ui.text(c, f"Taps: {self.live_taps}", (770, 650), 0.9, ui.OK, 2)
+        elif kind == "tremor":
+            ui.fingertip_chart(c, self.trem_t, self.trem_xy, self.clock(), 770, 465, 490, 190)
+        else:
+            ui.text(c, f"Flips: {len(self.flip_times) // 2}", (770, 520), 1.6, ui.OK, 3)
+            ui.text(c, f"({len(self.flip_times)} half-flips)", (770, 560), 0.6, ui.GREY)
 
-    def _draw_done(self, c, now) -> None:
-        self._test_title(c)
-        tr = self.results[self.test]
-        if tr.kind == "tremor" and tr.image is not None:
-            ui.paste(c, tr.image, 20, 135, 720, 520)
-        elif tr.kind == "tapping":
+    def _draw_done_left(self, c, tr: TestResult) -> None:
+        if tr.kind == "tremor":
+            if tr.image is not None:
+                ui.paste(c, tr.image, 20, 135, 720, 520)
+            return
+        if tr.kind == "tapping":
             t0 = self.tap_t[0] if self.tap_t else 0.0
             span = (self.tap_t[-1] - t0) if self.tap_t else self.seconds
             draw_distance_graph(c, self.tap_t, self.tap_d, t0 + span, 20, 135, 720, 520,
@@ -391,36 +507,47 @@ class App:
                 cv2.line(c, (px, 640), (px, 655), ui.ACCENT, 2)
             ui.text(c, f"{f.n_taps} taps, {f.taps_per_sec:.1f}/s  (ticks = detected taps)",
                     (40, 630), 0.6, ui.WHITE)
+            return
+        f = tr.features
+        ui.flip_timeline(c, list(f.flip_times), self.seconds, None, 20, 135, 720, 160)
+        lines = [f"{f.full_flips} full flips ({f.half_flips} half-flips)",
+                 f"{f.flips_per_sec:.2f} full flips per second",
+                 f"rhythm CV {f.interval_cv:.2f}   slowdown {f.decrement:.0%}",
+                 f"{f.hesitations} hesitation(s)"]
+        for i, line in enumerate(lines):
+            ui.text(c, line, (40, 350 + i * 40), 0.8, ui.WHITE)
+
+    def _draw_done(self, c, now) -> None:
+        self._test_title(c)
+        tr = self.results[self.test]
+        self._draw_done_left(c, tr)
         ui.score_card(c, 760, 135, 500, 300, TITLES[tr.kind], tr.result.score, tr.result.reasons)
         if self.idx + 1 < len(TESTS):
             kind, hand = TESTS[self.idx + 1]
             ui.text(c, f"Next: {hand.upper()} hand {kind}", (770, 485), 0.85, ui.WHITE, 1)
-            for i, line in enumerate(INSTRUCTIONS[kind]):
-                ui.text(c, line.format(hand=hand.upper()), (770, 520 + i * 30), 0.6, ui.GREY)
-            ui.text(c, "SPACE to start", (770, 640), 0.9, ui.ACCENT, 2)
+            ui.text(c, "SPACE to continue", (770, 640), 0.9, ui.ACCENT, 2)
         else:
             ui.text(c, "SPACE for results", (770, 520), 1.0, ui.ACCENT, 2)
 
     def _draw_results(self, c, now) -> None:
-        ui.text(c, "Results", (20, 105), 1.1, ui.ACCENT, 2)
+        ui.text(c, "Results", (20, 100), 1.0, ui.ACCENT, 2)
         if self.save_msg:
             col = ui.REC if self.save_msg.startswith("NOT") else ui.DIM
-            ui.text(c, self.save_msg, (200, 103), 0.55, col)
-        for i, (kind, hand) in enumerate(TESTS):
+            ui.text(c, self.save_msg, (180, 98), 0.5, col)
+        for kind, hand in TESTS:
             tr = self.results.get((kind, hand))
             res = tr.result if tr else ScoreResult(None, ["Not run"])
-            row, col = (0, 0 if hand == "Right" else 1) if kind == "tremor" else \
-                (1, 0 if hand == "Right" else 1)
-            ui.score_card(c, 20 + col * 630, 120 + row * 235, 610, 225,
-                          f"{hand} - {TITLES[kind]}", res.score, res.reasons)
-        y = 610
+            row = ("tremor", "tapping", "flipping").index(kind)
+            col = 0 if hand == "Right" else 1
+            ui.score_card(c, 20 + col * 625, 112 + row * 166, 615, 158,
+                          f"{hand} - {TITLES[kind]}", res.score, res.reasons, compact=True)
+        y = 628
         if self.flags:
-            ui.text(c, "ASYMMETRY", (20, y + 18), 0.75, ui.WARN, 2)
-            line = "  |  ".join(self.flags)
-            for j, part in enumerate(ui.wrap(line, ui.W - 200, 0.52)[:3]):
-                ui.text(c, part, (180, y + 16 + j * 22), 0.52, ui.WARN)
+            ui.text(c, "ASYMMETRY", (20, y + 14), 0.65, ui.WARN, 2)
+            for j, part in enumerate(ui.wrap("  |  ".join(self.flags), ui.W - 190, 0.46)[:2]):
+                ui.text(c, part, (165, y + 12 + j * 20), 0.46, ui.WARN)
         else:
-            ui.text(c, "No left/right asymmetry flagged", (20, y + 18), 0.65, ui.GREY)
+            ui.text(c, "No left/right asymmetry flagged", (20, y + 14), 0.6, ui.GREY)
 
     def _draw_trend(self) -> np.ndarray:
         c = ui.blank()
@@ -428,10 +555,7 @@ class App:
             ui.centred(c, "Trend chart unavailable (see console)", 360, 1.0, ui.REC)
         else:
             c[:self.trend_img.shape[0]] = self.trend_img
-        ui.panel(c, 0, ui.H - 36, ui.W, 36)
-        ui.text(c, DISCLAIMER, (20, ui.H - 12), 0.55, ui.WARN)
-        hint = "SPACE new session   R restart   Q quit"
-        ui.text(c, hint, (ui.W - 20 - ui.text_width(hint, 0.5), ui.H - 12), 0.5, ui.GREY)
+        self._draw_footer(c, "SPACE new session   R restart   Q quit")
         return c
 
 
@@ -439,15 +563,16 @@ class App:
 def build(args):
     from device import ArduinoDevice, MockDevice
     from tapping_tracker import CameraHand, FakeHand
-    device = MockDevice() if (args.sim or args.sim_device) else ArduinoDevice(args.port)
+    sim_dev = args.sim or args.sim_device
+    device = MockDevice(test_seconds=args.seconds) if sim_dev else ArduinoDevice(args.port)
     hands = FakeHand(test_seconds=args.seconds) if args.sim else CameraHand(args.camera)
     if not hands.ok:
-        log.warning("%s - tapping tests will show a message (use --sim for a fake hand)",
+        log.warning("%s - camera tests will show a message (use --sim for a fake hand)",
                     hands.status)
     return device, hands
 
 
-MIN_TEST_S, MAX_TEST_S = 5.0, 60.0   # decrement needs two 3-s windows; tremor needs >= 2 s
+MIN_TEST_S, MAX_TEST_S = 9.0, 60.0   # flipping decrement compares two 4-s windows
 
 
 def _seconds(value: str) -> float:
@@ -462,7 +587,7 @@ def warm_up_matplotlib() -> None:
     Pay that before the window opens instead of mid-demo."""
     t0 = time.perf_counter()
     try:
-        ui.spectrum_image(np.linspace(0, 50, 64), np.ones(64), 5.0, 0.0, 0, 320, 240)
+        ui.spectrum_image(np.linspace(0, 15, 64), np.ones(64), 5.0, 0.0, 0, 320, 240)
         history.trend_image([], 320, 240)
     except Exception:
         log.exception("matplotlib warm-up failed (charts may be unavailable)")
@@ -477,7 +602,7 @@ def parse_args(argv=None):
     p.add_argument("--port", help="serial port, e.g. COM5 (default: auto-detect)")
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--seconds", type=_seconds, default=10.0,
-                   help="recording length per test, 5-60 (default 10)")
+                   help=f"recording length per test, {MIN_TEST_S:g}-{MAX_TEST_S:g} (default 10)")
     p.add_argument("--history", default=history.DEFAULT_PATH)
     return p.parse_args(argv)
 
@@ -528,7 +653,6 @@ def main(argv=None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if args.seed_history:
         history.seed_history(args.history)
-        log.info("Seeded 7 days of fake sessions into %s", args.history)
     device, hands = build(args)
     warm_up_matplotlib()
     app = App(device, hands, args.seconds, args.history)

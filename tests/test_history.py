@@ -25,9 +25,10 @@ def test_seed_history_right_hand_worsens(tmp_path):
     assert rows[0]["timestamp"].startswith("2026-09-26")
     r_tremor = [int(r["tremor_R"]) for r in rows]
     r_tap = [int(r["tap_R"]) for r in rows]
-    assert r_tremor == sorted(r_tremor) and r_tremor[-1] > r_tremor[0]
-    assert r_tap == sorted(r_tap) and r_tap[-1] > r_tap[0]
-    assert all(r["tremor_L"] == "0" and r["tap_L"] == "0" for r in rows)
+    r_flip = [int(r["flip_R"]) for r in rows]
+    for series in (r_tremor, r_tap, r_flip):
+        assert series == sorted(series) and series[-1] > series[0]
+    assert all(r["tremor_L"] == "0" and r["tap_L"] == "0" and r["flip_L"] == "0" for r in rows)
 
 
 def test_trend_image_shapes(tmp_path):
