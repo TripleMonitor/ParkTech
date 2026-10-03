@@ -3,33 +3,41 @@
 ALL THRESHOLDS ARE DEMO THRESHOLDS, not clinically validated. This is a
 tracking / decision-support aid, NOT a diagnosis.
 
-score is None only when the test could not be measured (no data / no hand);
+score is None only when the test could not be measured (no hand / no data);
 the reasons then say why and what to do.
 """
 from __future__ import annotations
 
 from typing import NamedTuple, Optional
 
+from flipping_analysis import NO_CHANGE_WARN_S, FlippingFeatures
 from tapping_analysis import TappingFeatures
 from tremor_analysis import (CLEAR_PEAK_RATIO, MIN_TREMOR_CM, PD_BAND_HZ, TREMOR_BAND_HZ,
                              TremorFeatures, effective_displacement_cm)
 
 # Tremor amplitude bands (cm): <1 -> 1, 1-3 -> 2, 3-10 -> 3, >=10 -> 4
 TREMOR_CUTS_CM = (1.0, 3.0, 10.0)
+MIN_DATA_FRACTION = 0.8      # a recording must cover 80% of the planned test
 
-# Tapping, demo thresholds
+# Finger tapping
 TAP_SLOW = 2.0               # taps/s
 TAP_SMALL = 0.5              # normalised amplitude
-TAP_DECREMENT = 0.30         # fraction
+TAP_DECREMENT = 0.30
 TAP_IRREGULAR_CV = 0.30
-TAP_MIN_TAPS = 5             # fewer -> score 4 "barely able"
-TAP_MIN_VISIBLE = 0.5        # fraction of frames with a hand
+TAP_MIN_TAPS = 5
+TAP_MIN_VISIBLE = 0.5
 
-MIN_DATA_FRACTION = 0.8     # tremor recording must cover 80% of the planned test
+# Hand flipping
+FLIP_SLOW = 1.5              # full flips/s
+FLIP_IRREGULAR_CV = 0.35
+FLIP_DECREMENT = 0.25
+FLIP_MIN_FULL = 5
 
 # Asymmetry: % difference is relative to the LARGER value (4.0 vs 3.0 -> 25%)
 ASYM_POINTS = 1
 ASYM_RATIO = 0.25
+
+SENSOR_CHECK = "Sensor not flipping - check it's taped on and upright"
 
 
 class ScoreResult(NamedTuple):
@@ -41,11 +49,15 @@ def _band(lo_hi: tuple[float, float]) -> str:
     return f"{lo_hi[0]:g}-{lo_hi[1]:g} Hz"
 
 
+# --------------------------------------------------------------------------- tremor
 def score_tremor(f: TremorFeatures, expected_s: Optional[float] = None) -> ScoreResult:
-    if not f.valid or (expected_s and f.duration_s < MIN_DATA_FRACTION * expected_s):
-        planned = f" of {expected_s:g} s" if expected_s else ""
-        return ScoreResult(None, [f"Only {f.duration_s:.1f} s{planned} of sensor data - "
-                                  "check the Arduino and repeat"])
+    if not f.valid:
+        if f.hand_visible < 0.5:
+            return ScoreResult(None, [f"Hand seen in only {f.hand_visible:.0%} of frames - "
+                                      "keep the palm facing the camera and repeat"])
+        return ScoreResult(None, [f"Only {f.duration_s:.1f} s of usable video - repeat"])
+    if expected_s and f.duration_s < MIN_DATA_FRACTION * expected_s:
+        return ScoreResult(None, [f"Only {f.duration_s:.1f} s of {expected_s:g} s recorded - repeat"])
     if not f.clear_peak:
         return ScoreResult(0, [f"No clear tremor: no distinct peak in {_band(TREMOR_BAND_HZ)} "
                                f"(largest at {f.peak_hz:.1f} Hz, {f.peak_ratio:.1f}x median, "
@@ -54,7 +66,6 @@ def score_tremor(f: TremorFeatures, expected_s: Optional[float] = None) -> Score
     if d < MIN_TREMOR_CM:
         return ScoreResult(0, [f"No clear tremor: {f.peak_hz:.1f} Hz peak only {d:.2f} cm "
                                f"(< {MIN_TREMOR_CM:g} cm)"])
-
     in_pd = PD_BAND_HZ[0] <= f.peak_hz <= PD_BAND_HZ[1]
     reasons = [f"Peak {f.peak_hz:.1f} Hz in Parkinson's range ({_band(PD_BAND_HZ)})" if in_pd
                else f"Peak {f.peak_hz:.1f} Hz: tremor band but outside Parkinson's range "
@@ -68,11 +79,12 @@ def score_tremor(f: TremorFeatures, expected_s: Optional[float] = None) -> Score
         score, label = 3, f"{c2:g}-{c3:g} cm (moderate)"
     else:
         score, label = 4, f">= {c3:g} cm (severe)"
-    reasons.append(f"Amplitude {d:.2f} cm: {label}")
+    reasons.append(f"Fingertip moves {d:.2f} cm: {label}")
     reasons.append(f"Tremor present in {f.window_pct:.0f}% of 1-second windows")
     return ScoreResult(score, reasons)
 
 
+# --------------------------------------------------------------------------- tapping
 def tapping_problems(f: TappingFeatures) -> list[str]:
     problems = []
     if f.taps_per_sec < TAP_SLOW:
@@ -111,6 +123,37 @@ def score_tapping(f: TappingFeatures) -> ScoreResult:
     return ScoreResult(min(3, len(problems)), problems + _tracking_note(f))
 
 
+# --------------------------------------------------------------------------- flipping
+def flipping_problems(f: FlippingFeatures) -> list[str]:
+    problems = []
+    if f.flips_per_sec < FLIP_SLOW:
+        problems.append(f"Slow: {f.flips_per_sec:.1f} full flips/s (< {FLIP_SLOW:g})")
+    if f.interval_cv > FLIP_IRREGULAR_CV:
+        problems.append(f"Irregular rhythm: interval CV {f.interval_cv:.2f} (> {FLIP_IRREGULAR_CV:g})")
+    if f.decrement > FLIP_DECREMENT:
+        problems.append(f"Slows down: {f.decrement:.0%} slower in last 4 s vs first 4 s "
+                        f"(> {FLIP_DECREMENT:.0%})")
+    if f.hesitations >= 1:
+        problems.append(f"{f.hesitations} hesitation(s): pause > 2x the usual gap")
+    return problems
+
+
+def score_flipping(f: FlippingFeatures) -> ScoreResult:
+    if f.half_flips == 0:
+        return ScoreResult(4, [f"No flips detected in {f.duration_s:.0f} s", SENSOR_CHECK])
+    note = [f"Note: no flip in the first {NO_CHANGE_WARN_S:g} s - {SENSOR_CHECK.lower()}"] \
+        if f.stuck_at_start else []
+    if f.full_flips < FLIP_MIN_FULL:
+        return ScoreResult(4, [f"Barely able: only {f.full_flips} full flips in "
+                               f"{f.duration_s:.0f} s (< {FLIP_MIN_FULL})"] + note)
+    problems = flipping_problems(f)
+    if not problems:
+        return ScoreResult(0, [f"No problems: {f.flips_per_sec:.1f} full flips/s "
+                               f"({f.full_flips} flips), steady rhythm"] + note)
+    return ScoreResult(min(3, len(problems)), problems + note)
+
+
+# --------------------------------------------------------------------------- asymmetry
 def _differs(a: float, b: float) -> float:
     big = max(abs(a), abs(b))
     return 0.0 if big == 0 else abs(a - b) / big
@@ -131,19 +174,27 @@ def asymmetry(test: str, right: ScoreResult, left: ScoreResult,
     return flags
 
 
+def _both_scored(rs: ScoreResult, ls: ScoreResult) -> bool:
+    return rs.score is not None and ls.score is not None
+
+
 def tremor_asymmetry(rf: TremorFeatures, lf: TremorFeatures,
                      rs: ScoreResult, ls: ScoreResult) -> list[str]:
-    # Only displacement from a clear tremor peak counts (otherwise 0), and the %
-    # rule only applies once either side reaches the tremor threshold, so two
-    # noise-level readings (e.g. 0.01 vs 0.02 cm) are never flagged.
+    # Only displacement from a clear peak counts (otherwise 0), and the % rule only
+    # applies once either side reaches the tremor threshold, so two noise-level
+    # readings (e.g. 0.01 vs 0.02 cm) are never flagged.
     rd, ld = effective_displacement_cm(rf), effective_displacement_cm(lf)
-    measurable = rs.score is not None and ls.score is not None and max(rd, ld) >= MIN_TREMOR_CM
+    measurable = _both_scored(rs, ls) and max(rd, ld) >= MIN_TREMOR_CM
     return asymmetry("Tremor", rs, ls, "displacement cm", rd, ld, compare_feature=measurable)
 
 
 def tapping_asymmetry(rf: TappingFeatures, lf: TappingFeatures,
                       rs: ScoreResult, ls: ScoreResult) -> list[str]:
-    # taps/s is only compared when both sides could be scored (hand visible)
-    both = rs.score is not None and ls.score is not None
     return asymmetry("Tapping", rs, ls, "taps/s", rf.taps_per_sec, lf.taps_per_sec,
-                     compare_feature=both)
+                     compare_feature=_both_scored(rs, ls))
+
+
+def flipping_asymmetry(rf: FlippingFeatures, lf: FlippingFeatures,
+                       rs: ScoreResult, ls: ScoreResult) -> list[str]:
+    return asymmetry("Flipping", rs, ls, "flips/s", rf.flips_per_sec, lf.flips_per_sec,
+                     compare_feature=_both_scored(rs, ls))

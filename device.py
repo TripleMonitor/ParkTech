@@ -1,11 +1,13 @@
-"""Arduino serial link + MockDevice for --sim. Both share the same interface:
+"""Arduino serial link (SW-520D tilt switch, buzzer, LED, LCD) + MockDevice for --sim.
 
-    start() stop() drain()->list[Sample] beep(n) led(c) lcd(l1, l2) close()
-    connected: bool      status: str (human-readable, for the UI)
+Both share the same interface:
+    start() stop() request_state() drain()->list[SwitchEvent] beep(n) led(c) lcd(l1, l2) close()
+    state: Optional[int]   connected: bool   status: str   warning: str
 
 Protocol (115200 baud, newline-terminated):
-  Arduino -> PC:  READY on boot; T,millis,ax,ay,az  (m/s^2, 100 Hz, only while streaming)
-  PC -> Arduino:  START / STOP / BEEP,n / LED,G|Y|R|OFF / LCD,line1|line2
+  Arduino -> PC:  READY on boot;  S,millis,0|1  on every debounced change (between START/STOP)
+                  and as the reply to STATE
+  PC -> Arduino:  START / STOP / STATE / BEEP,n / LED,G|Y|R|OFF / LCD,line1|line2
 """
 from __future__ import annotations
 
@@ -15,44 +17,49 @@ import queue
 import random
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable, NamedTuple, Optional
 
 log = logging.getLogger(__name__)
 
 BAUD = 115200
-SAMPLE_HZ = 100
 LCD_WIDTH = 16
 LED_COLOURS = ("G", "Y", "R", "B", "OFF")
 READY_TIMEOUT_S = 4.0
 RETRY_S = 1.5
-MAX_BUFFER = 60 * SAMPLE_HZ   # newest samples are dropped beyond 60 s so a stuck UI can't eat RAM
+MAX_BUFFER = 5000            # newest events are dropped beyond this so a stuck UI can't eat RAM
 WRITE_QUEUE_MAX = 50
 
 # Port preference: official Arduino, then CH340 clones, then generic USB-serial chips
 PREFERRED_VIDS = ((0x2341, 0x2A03), (0x1A86,), (0x0403, 0x10C4))
 
 
-class Sample(NamedTuple):
+class SwitchReport(NamedTuple):
+    """One parsed 'S,millis,state' line (Arduino clock)."""
     t_ms: float
-    ax: float
-    ay: float
-    az: float
+    state: int
 
 
-def parse_line(line) -> Optional[Sample]:
-    """Parse 'T,millis,ax,ay,az'. None for anything else (READY, garbage, partial, empty)."""
+class SwitchEvent(NamedTuple):
+    """A switch report placed on the PC clock (seconds, same clock as the app)."""
+    t: float
+    state: int
+
+
+def parse_line(line) -> Optional[SwitchReport]:
+    """Parse 'S,millis,0|1'. None for anything else (READY, garbage, partial, empty)."""
     if isinstance(line, bytes):
         line = line.decode("ascii", errors="ignore")
     parts = line.strip().split(",")
-    if len(parts) != 5 or parts[0] != "T":
+    if len(parts) != 3 or parts[0] != "S" or parts[2] not in ("0", "1"):
         return None
     try:
-        vals = [float(p) for p in parts[1:]]
+        t_ms = float(parts[1])
     except ValueError:
         return None
-    if not all(math.isfinite(v) for v in vals):
+    if not math.isfinite(t_ms) or t_ms < 0:
         return None
-    return Sample(*vals)
+    return SwitchReport(t_ms, int(parts[2]))
 
 
 def lcd_command(line1: str, line2: str = "") -> str:
@@ -80,6 +87,27 @@ def find_arduino_port() -> Optional[str]:
     return None
 
 
+class ClockMapper:
+    """Maps Arduino millis onto the PC clock.
+
+    offset = min over reports of (pc_receive_time - arduino_time): the report with
+    the least USB latency gives the best estimate, so intervals keep the Arduino's
+    millisecond precision while lining up with the PC's recording window.
+    """
+
+    def __init__(self) -> None:
+        self.offset: Optional[float] = None
+
+    def reset(self) -> None:
+        self.offset = None
+
+    def to_pc(self, t_ms: float, received: float) -> float:
+        cand = received - t_ms / 1000.0
+        if self.offset is None or cand < self.offset:
+            self.offset = cand
+        return t_ms / 1000.0 + self.offset
+
+
 class ArduinoDevice:
     """Serial link that keeps (re)connecting in a background thread.
 
@@ -90,17 +118,20 @@ class ArduinoDevice:
     firmware ERROR line or a missing READY, for the UI to show.
     """
 
-    def __init__(self, port: Optional[str] = None):
+    def __init__(self, port: Optional[str] = None, clock: Callable[[], float] = time.perf_counter):
         self._want_port = port
+        self._clock = clock
         self.port = port or "?"
-        self._samples: "queue.Queue[Sample]" = queue.Queue()
+        self._events: "queue.Queue[SwitchEvent]" = queue.Queue()
         self._writes: "queue.Queue[str]" = queue.Queue(maxsize=WRITE_QUEUE_MAX)
         self._ser = None
         self._ser_lock = threading.Lock()
         self._stop = threading.Event()
+        self._mapper = ClockMapper()
         self.connected = False
         self.status = "Looking for Arduino..."
         self.warning = ""
+        self.state: Optional[int] = None
         self._streaming_wanted = False
         self._last_led: Optional[str] = None
         self._last_lcd: Optional[str] = None
@@ -135,6 +166,7 @@ class ArduinoDevice:
             self.status = f"Cannot open {port}: {exc}"
             return False
         self.port = port
+        self._mapper.reset()          # the Uno resets on open: millis restart from 0
         if self._wait_ready(ser):
             if self.warning.startswith("No READY"):
                 self.warning = ""
@@ -149,7 +181,7 @@ class ArduinoDevice:
         return True
 
     def _wait_ready(self, ser) -> bool:
-        deadline = time.monotonic() + READY_TIMEOUT_S   # Uno resets when the port opens
+        deadline = time.monotonic() + READY_TIMEOUT_S
         while time.monotonic() < deadline and not self._stop.is_set():
             try:
                 line = ser.readline().decode("ascii", errors="ignore").strip()
@@ -172,6 +204,7 @@ class ArduinoDevice:
                 self._enqueue(cmd)
         if self._streaming_wanted:
             self._enqueue("START")
+        self._enqueue("STATE")
 
     def _read_until_error(self) -> None:
         while not self._stop.is_set():
@@ -183,14 +216,14 @@ class ArduinoDevice:
             except Exception as exc:
                 log.error("Serial read failed: %s", exc)
                 return
+            received = self._clock()
             if not raw.endswith(b"\n"):
-                continue        # empty (timeout) or partial line: never half-parse a sample
-            sample = parse_line(raw)
-            if sample is not None:
-                if "MPU" in self.warning:
-                    self.warning = ""      # sensor is delivering data again
-                if self._samples.qsize() < MAX_BUFFER:
-                    self._samples.put(sample)
+                continue        # empty (timeout) or partial line: never half-parse
+            rep = parse_line(raw)
+            if rep is not None:
+                self.state = rep.state
+                if self._events.qsize() < MAX_BUFFER:
+                    self._events.put(SwitchEvent(self._mapper.to_pc(rep.t_ms, received), rep.state))
                 continue
             text = raw.decode("ascii", errors="ignore").strip()
             if text.startswith("ERROR"):
@@ -246,16 +279,20 @@ class ArduinoDevice:
         self.drain()
         self._streaming_wanted = True
         self._send("START")
+        self._send("STATE")          # reference state at t=0 of the recording
 
     def stop(self) -> None:
         self._streaming_wanted = False
         self._send("STOP")
 
-    def drain(self) -> list[Sample]:
+    def request_state(self) -> None:
+        self._send("STATE")
+
+    def drain(self) -> list[SwitchEvent]:
         out = []
         while True:
             try:
-                out.append(self._samples.get_nowait())
+                out.append(self._events.get_nowait())
             except queue.Empty:
                 return out
 
@@ -280,60 +317,95 @@ class ArduinoDevice:
         self._close_port()
 
 
-class MockDevice:
-    """Fake IMU at 100 Hz: noise + slow sway, or a 5 Hz tremor while `tremor_on` is set."""
+# --------------------------------------------------------------------------- simulation
+@dataclass(frozen=True)
+class FlipProfile:
+    rate: float = 2.4              # full flips per second at the start
+    slowing: float = 0.0           # fraction of rate lost by the end of the test
+    pauses: tuple = ()             # (start_s, duration_s) with no flipping
+    bounce_p: float = 0.15         # chance a change comes with a contact-bounce burst
 
-    TREMOR_HZ = 5.0
-    TREMOR_ACCEL = 12.0   # m/s^2 on x -> ~1.2 cm at 5 Hz -> demo score 2
-    NOISE_STD = 0.05
+
+NORMAL_FLIPS = FlipProfile()
+IMPAIRED_FLIPS = FlipProfile(rate=1.5, slowing=0.45, pauses=((5.0, 1.2),))
+
+
+class MockDevice:
+    """Fake SW-520D: emits flip events while streaming, following the profile for `sim_hand`."""
+
     connected = True
     port = "SIM"
     status = "SIM device"
     warning = ""
 
-    def __init__(self, seed: Optional[int] = None,
-                 clock: Callable[[], float] = time.monotonic):
+    def __init__(self, seed: Optional[int] = None, clock: Callable[[], float] = time.perf_counter,
+                 profiles: Optional[dict] = None, test_seconds: float = 10.0):
         self._rng = random.Random(seed)
         self._clock = clock
-        self._t0 = clock()
-        self.tremor_on = False
+        self.profiles = dict(profiles or {"Right": IMPAIRED_FLIPS, "Left": NORMAL_FLIPS})
+        self.sim_hand = "Left"
+        self.flipping = True            # False = sensor not moving (e.g. fell off)
+        self._seconds = test_seconds
         self._streaming = False
-        self._next_ms = 0.0
+        self._pending: list[SwitchEvent] = []
+        self.state: Optional[int] = 0
+        self._t0 = 0.0
+        self._next_t = math.inf
         self.beeps = 0
         self.last_lcd = ("", "")
         self.last_led = "OFF"
 
-    def _now_ms(self) -> float:
-        return (self._clock() - self._t0) * 1000.0
+    def _rate(self, t: float) -> float:
+        p = self.profiles.get(self.sim_hand, NORMAL_FLIPS)
+        return p.rate * (1 - p.slowing * min(1.0, t / self._seconds))
 
-    def sample_at(self, t_ms: float) -> Sample:
-        t = t_ms / 1000.0
-        n = self._rng.gauss
-        sway = 0.3 * math.sin(2 * math.pi * 0.4 * t)
-        trem = self.TREMOR_ACCEL * math.sin(2 * math.pi * self.TREMOR_HZ * t) if self.tremor_on else 0.0
-        return Sample(t_ms, sway + trem + n(0, self.NOISE_STD),
-                      0.3 * trem + n(0, self.NOISE_STD), 9.81 + n(0, self.NOISE_STD))
+    def _paused_until(self, t: float) -> Optional[float]:
+        for start, dur in self.profiles.get(self.sim_hand, NORMAL_FLIPS).pauses:
+            if start <= t < start + dur:
+                return start + dur
+        return None
+
+    def _schedule(self, after: float) -> None:
+        t = after - self._t0
+        nxt = t + self._rng.uniform(0.9, 1.1) / (2 * self._rate(t))
+        resume = self._paused_until(nxt)
+        if resume is not None:
+            nxt = resume + 1.0 / (2 * self._rate(resume))
+        self._next_t = self._t0 + nxt
+
+    def _generate(self, now: float) -> None:
+        p = self.profiles.get(self.sim_hand, NORMAL_FLIPS)
+        while self._streaming and self.flipping and self._next_t <= now:
+            t = self._next_t
+            self.state = 1 - self.state
+            if self._rng.random() < p.bounce_p:          # ball bounce: x -> y -> x -> y in ~10 ms
+                self._pending += [SwitchEvent(t, self.state), SwitchEvent(t + 0.004, 1 - self.state),
+                                  SwitchEvent(t + 0.009, self.state)]
+            else:
+                self._pending.append(SwitchEvent(t, self.state))
+            self._schedule(t)
 
     def start(self) -> None:
+        self._pending = []
         self._streaming = True
-        self._next_ms = self._now_ms()
+        self._t0 = self._clock()
+        self._pending.append(SwitchEvent(self._t0, self.state))      # STATE reply
+        self._schedule(self._t0)
 
     def stop(self) -> None:
         self._streaming = False
 
-    def drain(self) -> list[Sample]:
-        if not self._streaming:
-            return []
-        now = self._now_ms()
-        out = []
-        while self._next_ms <= now:
-            out.append(self.sample_at(self._next_ms))
-            self._next_ms += 1000.0 / SAMPLE_HZ
+    def request_state(self) -> None:
+        self._pending.append(SwitchEvent(self._clock(), self.state))
+
+    def drain(self) -> list[SwitchEvent]:
+        self._generate(self._clock())
+        out, self._pending = self._pending, []
         return out
 
     def beep(self, n: int = 1) -> None:
         self.beeps += n
-        if self._clock is not time.monotonic:
+        if self._clock is not time.perf_counter:
             return   # headless/selftest: count only, no sound
 
         def _play() -> None:
