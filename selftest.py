@@ -116,6 +116,16 @@ def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[st
         ("sessions.csv written", len(rows) == 1 and rows[0]["tremor_R"] == str(rt)
          and rows[0]["flip_R"] == str(rf) and rows[0]["session_id"] == app.session_id,
          f"{len(rows)} row(s)"),
+        ("Fusion locked on both hands (camera agrees with switch)",
+         all(res[("flipping", h)].fusion is not None and res[("flipping", h)].fusion.locked
+             for h in ("Right", "Left")),
+         " / ".join(f"{h[0]} sw {res[('flipping', h)].fusion.switch_half_flips} cam "
+                    f"{res[('flipping', h)].fusion.camera_half_flips}" for h in ("Right", "Left"))),
+        ("Right flips smaller (camera rotation)",
+         res[("flipping", "Right")].fusion.median_amplitude_deg
+         < res[("flipping", "Left")].fusion.median_amplitude_deg,
+         f"R {res[('flipping', 'Right')].fusion.median_amplitude_deg:.0f} deg vs "
+         f"L {res[('flipping', 'Left')].fusion.median_amplitude_deg:.0f} deg"),
         ("Signal quality measured on camera tests",
          all(res[(k, h)].quality is not None and res[(k, h)].quality.frames > 250
              for k in ("tremor", "tapping") for h in ("Right", "Left")),

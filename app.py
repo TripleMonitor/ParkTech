@@ -29,6 +29,7 @@ import ui
 from boot import BootChecks
 from quality import SignalQuality, signal_quality
 from flipping_analysis import FlippingFeatures, analyze_flipping, debounce
+from fusion import FusionResult, current_angle, fuse, palm_normal
 from scoring import (ScoreResult, explain_flipping, explain_tapping, explain_tremor,
                      flipping_asymmetry, score_flipping, score_tapping, score_tremor,
                      tapping_asymmetry, tremor_asymmetry)
@@ -70,10 +71,15 @@ class TestResult:
     result: ScoreResult
     image: Optional[np.ndarray] = None  # spectrum for tremor
     quality: Optional[SignalQuality] = None   # camera tests
+    fusion: Optional[FusionResult] = None     # hand flipping
 
     @property
     def low_confidence(self) -> bool:
-        return self.quality is not None and self.quality.low and self.result.score is not None
+        if self.result.score is None:
+            return False
+        bad_q = self.quality is not None and self.quality.low
+        bad_f = self.fusion is not None and self.fusion.camera_ok and not self.fusion.locked
+        return bad_q or bad_f
 
 
 def led_for(scores: list[Optional[int]]) -> str:
@@ -102,6 +108,10 @@ class App:
         self.clock = clock          # perf_counter: monotonic() is 15.6 ms on Windows
         self.running = True
         self.boot = boot
+        if hasattr(hands, "flip_state"):          # sim: fake palm follows the fake switch
+            hands.flip_state = lambda: (self.device.state,
+                                        self.calib if self.calib is not None else
+                                        (self.device.state if self.state == "ready" else None))
         self.restart(0.0)
         if boot is not None:
             self.state = "boot"
@@ -146,6 +156,13 @@ class App:
         self.q_score: list[Optional[float]] = []
         self.fails0 = 0
         self.quality: Optional[SignalQuality] = None
+        self.fl_t: list[float] = []
+        self.fl_world: list[Optional[np.ndarray]] = []
+        self.flip_ref: Optional[np.ndarray] = None
+        self._ref_candidate: Optional[np.ndarray] = None
+        self.fusion: Optional[FusionResult] = None
+        self.flip_angle: Optional[float] = None
+        self._fuse_at = 0.0
 
     @property
     def test(self) -> tuple[str, str]:
@@ -186,6 +203,7 @@ class App:
         if self.test[0] == "tremor":
             self.trem_t, self.trem_xy, self.trem_lm = [], [], []    # drop preview frames
         if self.test[0] == "flipping":
+            self.flip_ref = self._ref_candidate      # palm-down normal from the countdown
             self.device.start()
 
     def _finish_test(self, now: float) -> None:
@@ -198,6 +216,8 @@ class App:
         else:
             self.device.stop()
             self.events.extend(self.device.drain())
+            self._update_live_flips(now)
+            self._update_fusion(force=True)
             self.results[self.test] = self._flipping_result(hand)
         score = self.results[self.test].result.score
         self._lcd_test(f"Score {'-' if score is None else score}")
@@ -247,10 +267,19 @@ class App:
             r = ScoreResult(None, ["Arduino disconnected during the test - repeat",
                                    self.device.status])
         else:
-            r = score_flipping(f)
+            fu = self.fusion
+            r = score_flipping(f, fu)
             if f.half_flips == 0 and getattr(self.device, "warning", ""):
                 r = ScoreResult(r.score, r.reasons + [self.device.warning])
-        return TestResult("flipping", hand, f, r)
+            if fu is not None and fu.camera_ok and not fu.locked and r.score is not None:
+                r = ScoreResult(r.score, r.reasons + [
+                    f"LOW CONFIDENCE: fusion mismatch (switch {fu.switch_half_flips} vs camera "
+                    f"{fu.camera_half_flips} half-flips)"])
+            elif fu is not None and fu.locked:
+                r = ScoreResult(r.score, r.reasons + [
+                    f"Fusion locked: switch {fu.switch_half_flips} / camera "
+                    f"{fu.camera_half_flips} half-flips agree"])
+        return TestResult("flipping", hand, f, r, fusion=self.fusion)
 
     def _enter_results(self, now: float) -> None:
         self._goto("results", now)
@@ -303,8 +332,11 @@ class App:
                             f"tap_{side}_rate": f.taps_per_sec, f"tap_{side}_amp": f.mean_amplitude})
             elif isinstance(f, FlippingFeatures):
                 ok = tr.result.score is not None
+                fu = tr.fusion
                 row.update({f"flip_{side}": tr.result.score,
-                            f"flip_{side}_rate": f.flips_per_sec if ok else None})
+                            f"flip_{side}_rate": f.flips_per_sec if ok else None,
+                            f"flip_{side}_amp_deg": fu.median_amplitude_deg
+                            if fu is not None and fu.camera_ok else None})
         return row
 
     # ---------------------------------------------------------------- input
@@ -382,10 +414,19 @@ class App:
                 self.tap_d.append(self.hf.distance)
                 self._update_live_taps(now)
         if kind == "flipping" and active:
+            self.hf = self.hands.read(now, hand, detect=True, test="flipping")
+            t_frame = self.clock()
+            if self.hf.world is not None and not recording:
+                n = palm_normal(self.hf.world)
+                if n is not None:
+                    self._ref_candidate = n          # latest palm-down pose before START
             if recording:
+                self.fl_t.append(t_frame)
+                self.fl_world.append(self.hf.world)
                 self.events.extend(self.device.drain())
                 self.device_lost |= not self.device.connected
                 self._update_live_flips(now)
+                self._update_fusion()
             else:
                 self.device.drain()                  # discard stray reports before START
 
@@ -405,6 +446,15 @@ class App:
         changes = debounce([e.t for e in self.events], [e.state for e in self.events],
                            self.calib)
         self.flip_times = [t - self.rec_start for t, _ in changes if t >= self.rec_start]
+
+    def _update_fusion(self, force: bool = False) -> None:
+        now = self.clock()
+        if not force and now - self._fuse_at < LIVE_EVERY_S:
+            return
+        self._fuse_at = now
+        self.fusion = fuse(self.fl_t, self.fl_world, len(self.flip_times), self.rec_start,
+                           self.seconds, self.flip_ref)
+        self.flip_angle = current_angle(self.fl_world[-3:], self.flip_ref)
 
     def _palm_down(self) -> Optional[bool]:
         """Ready: the patient is told to hold palm-down, so the current state IS palm-down.
@@ -496,23 +546,43 @@ class App:
     def _draw_left_live(self, c, now) -> None:
         kind, _ = self.test
         if kind == "flipping":
-            ui.flip_indicator(c, self._palm_down(), 20, 135, 720, 200)
-            ui.tilt_plot(c, self.events, self.calib, self.clock(), 20, 345, 720, 100)
-            if self.state == "ready":
-                ui.centred(c, "Calibrating: hold your hand PALM-DOWN", 480, 0.8, ui.WARN, 1, 20, 740)
-                ui.centred(c, f"switch reads {self.device.state if self.device.state is not None else '?'}",
-                           515, 0.6, ui.GREY, 1, 20, 740)
-            else:
-                elapsed = (self.clock() - self.rec_start) if self.state == "recording" else None
-                ui.flip_timeline(c, self.flip_times, self.seconds, elapsed, 20, 455, 720, 110)
-                if self.state == "recording" and elapsed is not None and \
-                        elapsed > STUCK_AFTER_S and not self.flip_times:
-                    ui.panel(c, 20, 580, 720, 40, (40, 40, 150))
-                    ui.centred(c, SENSOR_STUCK, 607, 0.65, ui.WHITE, 1, 20, 740)
+            self._draw_flipping_left(c)
             return
         self._draw_camera(c)
         if kind == "tremor":
             ui.text(c, CAMERA_NOTE, (30, 645), 0.5, ui.WARN)
+
+    def _draw_flipping_left(self, c) -> None:
+        kind, hand = self.test
+        frame = self.hf.frame
+        if frame is None:
+            ui.panel(c, 20, 135, 360, 270)
+            ui.centred(c, "camera unavailable", 260, 0.55, ui.WARN, 1, 20, 380)
+            ui.centred(c, "switch only", 290, 0.5, ui.GREY, 1, 20, 380)
+        else:
+            frame = frame.copy()
+            draw_hand(frame, self.hf, hand, test="tremor")
+            ui.paste(c, frame, 20, 135, 360, 270)
+            ui.brackets(c, 20, 135, 360, 270)
+            if self.state == "recording":
+                hud.scan_line(c, 20, 135, 360, 270, self.clock())
+        angle = self.flip_angle if self.state == "recording" else (0.0 if self.hf.world is not None else None)
+        ui.rotation_gauge(c, 392, 135, 348, 270, angle, self.fusion if self.state == "recording" else None,
+                          len(self.flip_times))
+        ui.flip_indicator(c, self._palm_down(), 20, 415, 720, 70)
+        ui.tilt_plot(c, self.events, self.calib, self.clock(), 20, 495, 720, 75)
+        if self.state == "ready":
+            ui.panel(c, 20, 580, 720, 75)
+            ui.centred(c, "Calibrating: hold your hand PALM-DOWN", 612, 0.6, ui.WARN, 2, 20, 740)
+            st = self.device.state if self.device.state is not None else "?"
+            ui.centred(c, f"switch reads {st}  (this state = palm-down)", 640, 0.45, ui.GREY, 1, 20, 740)
+            return
+        elapsed = (self.clock() - self.rec_start) if self.state == "recording" else None
+        ui.flip_timeline(c, self.flip_times, self.seconds, elapsed, 20, 580, 720, 75)
+        if self.state == "recording" and elapsed is not None and \
+                elapsed > STUCK_AFTER_S and not self.flip_times:
+            ui.panel(c, 20, 540, 720, 34, (40, 40, 150))
+            ui.centred(c, SENSOR_STUCK, 563, 0.55, ui.WHITE, 2, 20, 740)
 
     def _draw_right_column(self, c, big: str, sub: str, colour) -> None:
         kind, hand = self.test
@@ -550,8 +620,8 @@ class App:
         if kind in ("tremor", "tapping"):
             hud.quality_meter(c, self.quality, 770, 558, 490, self.sim_hand)
         else:
-            ui.text(c, f"Flips: {len(self.flip_times) // 2}", (770, 520), 1.6, ui.OK, 3)
-            ui.text(c, f"({len(self.flip_times)} half-flips)", (770, 560), 0.6, ui.GREY)
+            ui.text(c, f"FLIPS {len(self.flip_times) // 2:3d}", (770, 520), 1.4, ui.OK, 3)
+            ui.text(c, f"{len(self.flip_times)} half-flips (switch)", (770, 556), 0.5, ui.GREY)
 
     def _draw_done_left(self, c, tr: TestResult) -> None:
         if tr.kind == "tremor":
@@ -571,13 +641,25 @@ class App:
                     (40, 630), 0.6, ui.WHITE)
             return
         f = tr.features
-        ui.flip_timeline(c, list(f.flip_times), self.seconds, None, 20, 135, 720, 160)
-        lines = [f"{f.full_flips} full flips ({f.half_flips} half-flips)",
-                 f"{f.flips_per_sec:.2f} full flips per second",
-                 f"rhythm CV {f.interval_cv:.2f}   slowdown {f.decrement:.0%}",
-                 f"{f.hesitations} hesitation(s)"]
-        for i, line in enumerate(lines):
-            ui.text(c, line, (40, 350 + i * 40), 0.8, ui.WHITE)
+        ui.flip_timeline(c, list(f.flip_times), self.seconds, None, 20, 135, 720, 130)
+        fu = tr.fusion
+        lines = [("SWITCH", f"{f.full_flips} full flips ({f.half_flips} half-flips)"),
+                 ("RATE", f"{f.flips_per_sec:.2f} full flips per second"),
+                 ("RHYTHM", f"CV {f.interval_cv:.2f}   slowdown {f.decrement:.0%}   "
+                            f"{f.hesitations} hesitation(s)")]
+        if fu is not None:
+            cam = f"{fu.camera_half_flips} half-flips" if fu.camera_ok else "hand not tracked"
+            lines += [("CAMERA", cam),
+                      ("ROTATION", f"median {fu.median_amplitude_deg:.0f} deg, shrinks "
+                                   f"{fu.amplitude_decrement:.0%}" if fu.camera_ok else "n/a"),
+                      ("FUSION", fu.status)]
+        ui.panel(c, 20, 280, 720, 50 + 44 * len(lines))
+        for i, (label, value) in enumerate(lines):
+            ui.text(c, label, (40, 318 + i * 44), 0.45, ui.ACCENT, 2)
+            col = ui.WHITE
+            if label == "FUSION":
+                col = ui.OK if fu.locked else ui.WARN
+            ui.text(c, value, (180, 318 + i * 44), 0.55, col)
 
     def _draw_done(self, c, now) -> None:
         self._test_title(c)
@@ -598,7 +680,7 @@ class App:
         elif tr.kind == "tapping":
             e = explain_tapping(tr.features)
         else:
-            e = explain_flipping(tr.features)
+            e = explain_flipping(tr.features, tr.fusion)
         if tr.result.score is None:          # e.g. Arduino lost: show why, no rules
             return e._replace(score=None, rules=[], formula="not scored: " + tr.result.reasons[0])
         return e

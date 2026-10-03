@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import NamedTuple, Optional
 
 from flipping_analysis import NO_CHANGE_WARN_S, FlippingFeatures
+from fusion import AMP_DECREMENT, SMALL_AMPLITUDE_DEG, FusionResult
 from tapping_analysis import TappingFeatures
 from tremor_analysis import (CLEAR_PEAK_RATIO, MIN_TREMOR_CM, PD_BAND_HZ, TREMOR_BAND_HZ,
                              TremorFeatures, effective_displacement_cm)
@@ -124,6 +125,20 @@ def score_tapping(f: TappingFeatures) -> ScoreResult:
 
 
 # --------------------------------------------------------------------------- flipping
+def amplitude_problems(fu: Optional[FusionResult]) -> list[str]:
+    """Camera-measured flip amplitude problems (only when the camera tracked the hand)."""
+    if fu is None or not fu.camera_ok or fu.camera_half_flips == 0:
+        return []
+    out = []
+    if fu.median_amplitude_deg < SMALL_AMPLITUDE_DEG:
+        out.append(f"Small flips: median rotation {fu.median_amplitude_deg:.0f} deg "
+                   f"(< {SMALL_AMPLITUDE_DEG:g})")
+    if fu.amplitude_decrement > AMP_DECREMENT:
+        out.append(f"Flips get smaller: {fu.amplitude_decrement:.0%} less rotation in last 4 s "
+                   f"(> {AMP_DECREMENT:.0%})")
+    return out
+
+
 def flipping_problems(f: FlippingFeatures) -> list[str]:
     problems = []
     if f.flips_per_sec < FLIP_SLOW:
@@ -138,7 +153,7 @@ def flipping_problems(f: FlippingFeatures) -> list[str]:
     return problems
 
 
-def score_flipping(f: FlippingFeatures) -> ScoreResult:
+def score_flipping(f: FlippingFeatures, fusion: Optional[FusionResult] = None) -> ScoreResult:
     if f.half_flips == 0:
         return ScoreResult(4, [f"No flips detected in {f.duration_s:.0f} s", SENSOR_CHECK])
     note = [f"Note: no flip in the first {NO_CHANGE_WARN_S:g} s - {SENSOR_CHECK.lower()}"] \
@@ -146,7 +161,7 @@ def score_flipping(f: FlippingFeatures) -> ScoreResult:
     if f.full_flips < FLIP_MIN_FULL:
         return ScoreResult(4, [f"Barely able: only {f.full_flips} full flips in "
                                f"{f.duration_s:.0f} s (< {FLIP_MIN_FULL})"] + note)
-    problems = flipping_problems(f)
+    problems = flipping_problems(f) + amplitude_problems(fusion)
     if not problems:
         return ScoreResult(0, [f"No problems: {f.flips_per_sec:.1f} full flips/s "
                                f"({f.full_flips} flips), steady rhythm"] + note)
@@ -251,10 +266,17 @@ def explain_tapping(f: TappingFeatures) -> Explanation:
     return Explanation(s, rules, "score = min(3, problems fired); 4 if < 5 taps")
 
 
-def explain_flipping(f: FlippingFeatures) -> Explanation:
-    s = score_flipping(f).score
+def explain_flipping(f: FlippingFeatures, fusion: Optional[FusionResult] = None) -> Explanation:
+    s = score_flipping(f, fusion).score
     if s is None:
         return Explanation(None, [], "not scored")
+    cam = fusion is not None and fusion.camera_ok and fusion.camera_half_flips > 0
+    amp_rules = [
+        Rule("Rotation (camera)", f"{fusion.median_amplitude_deg:.0f} deg" if cam else "n/a",
+             f"< {SMALL_AMPLITUDE_DEG:g} deg", cam and fusion.median_amplitude_deg < SMALL_AMPLITUDE_DEG),
+        Rule("Rotation shrinks", f"{fusion.amplitude_decrement:.0%}" if cam else "n/a",
+             f"> {AMP_DECREMENT:.0%}", cam and fusion.amplitude_decrement > AMP_DECREMENT),
+    ] if fusion is not None else []
     rules = [
         Rule("Full flips", f"{f.full_flips}", f"< {FLIP_MIN_FULL} -> score 4",
              f.full_flips < FLIP_MIN_FULL),
@@ -263,8 +285,9 @@ def explain_flipping(f: FlippingFeatures) -> Explanation:
              f.interval_cv > FLIP_IRREGULAR_CV),
         Rule("Slowdown", f"{f.decrement:.0%}", f"> {FLIP_DECREMENT:.0%}", f.decrement > FLIP_DECREMENT),
         Rule("Hesitations", f"{f.hesitations}", ">= 1", f.hesitations >= 1),
-    ]
-    return Explanation(s, rules, "score = min(3, problems fired); 4 if < 5 full flips")
+    ] + amp_rules
+    return Explanation(s, rules, "score = min(3, problems fired); 4 if < 5 full flips; "
+                                 "rotation rows need the camera")
 
 
 def score_from_rules(kind: str, e: Explanation) -> Optional[int]:

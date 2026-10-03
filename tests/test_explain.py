@@ -45,3 +45,13 @@ def test_rules_show_measured_and_threshold():
     rows = {r.label: r for r in explain_tapping(f).rules}
     assert rows["Decrement"].measured == "34%" and rows["Decrement"].threshold == "> 30%"
     assert rows["Decrement"].fired and not rows["Hesitations"].fired
+
+
+@pytest.mark.parametrize("amp,dec,ok", list(itertools.product((90.0, 160.0), (0.1, 0.4), (True, False))))
+def test_flipping_panel_with_fusion_matches_scorer(amp, dec, ok):
+    from fusion import FusionResult
+    fu = FusionResult(ok, 1.0 if ok else 0.2, 40 if ok else 0, 40, ok, amp if ok else 0.0,
+                      dec if ok else 0.0)
+    f = FlippingFeatures(40, 20, 2.0, 0.1, 0.1, 0, 10.0, 0.3)
+    e = explain_flipping(f, fu)
+    assert e.score == score_flipping(f, fu).score == score_from_rules("flipping", e)

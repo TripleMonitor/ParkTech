@@ -259,6 +259,9 @@ def tilt_plot(canvas, events: Sequence, calib: Optional[int], now: float,
     panel(canvas, x, y, w, h)
     text(canvas, "tilt switch state (last 5 s)", (x + 10, y + 20), 0.45, GREY)
     hi, lo = y + 34, y + h - 14
+    text(canvas, "UP", (x + w - 50, hi + 5), 0.4, DIM)
+    text(canvas, "DOWN", (x + w - 50, lo + 5), 0.4, DIM)
+    w = w - 60                                   # leave room for the labels
     pts = [(e.t, e.state) for e in events if now - e.t <= seconds]
     if not pts:
         return
@@ -273,8 +276,6 @@ def tilt_plot(canvas, events: Sequence, calib: Optional[int], now: float,
         prev = py
     path.append((x + w, prev))
     cv2.polylines(canvas, [np.array(path, np.int32)], False, ACCENT, 2, cv2.LINE_AA)
-    text(canvas, "UP", (x + w - 34, hi + 5), 0.4, DIM)
-    text(canvas, "DOWN", (x + w - 50, lo + 5), 0.4, DIM)
 
 
 def score_card(canvas, x: int, y: int, w: int, h: int, title: str,
@@ -309,6 +310,45 @@ def brackets(canvas, x: int, y: int, w: int, h: int, colour=ACCENT, length: int 
 
 
 DIM_OK = (70, 140, 60)
+
+
+def rotation_gauge(canvas, x: int, y: int, w: int, h: int, angle: Optional[float],
+                   fusion, switch_half: int) -> None:
+    """Half-dial 0..180 deg (palm down -> palm up) + camera/switch fusion status."""
+    panel(canvas, x, y, w, h)
+    text(canvas, "PALM ROTATION (camera)", (x + 12, y + 22), 0.42, ACCENT, 2)
+    cx, cy, r = x + w // 2, y + 150, min(w // 2 - 30, 105)
+    cv2.ellipse(canvas, (cx, cy), (r, r), 0, 180, 360, PANEL_HI, 10)
+    for deg in (0, 45, 90, 135, 180):
+        a = np.radians(180 + deg)
+        p1 = (int(cx + (r - 14) * np.cos(a)), int(cy + (r - 14) * np.sin(a)))
+        p2 = (int(cx + (r + 6) * np.cos(a)), int(cy + (r + 6) * np.sin(a)))
+        cv2.line(canvas, p1, p2, DIM, 1)
+    text(canvas, "DOWN", (cx - r - 22, cy + 22), 0.38, DIM)
+    text(canvas, "UP", (cx + r - 6, cy + 22), 0.38, DIM)
+    if angle is not None:
+        cv2.ellipse(canvas, (cx, cy), (r, r), 0, 180, 180 + min(180.0, angle), ACCENT, 10)
+        a = np.radians(180 + min(180.0, angle))
+        cv2.line(canvas, (cx, cy), (int(cx + (r - 18) * np.cos(a)), int(cy + (r - 18) * np.sin(a))),
+                 WHITE, 2, cv2.LINE_AA)
+        txt = f"{angle:3.0f} deg"
+        text(canvas, txt, (x + w - 16 - text_width(txt, 0.6, 2), y + 24), 0.6, WHITE, 2)
+    else:
+        text(canvas, "no hand", (x + w - 16 - text_width("no hand", 0.5), y + 24), 0.5, DIM)
+    yy = cy + 48
+    cam = "--" if fusion is None or not fusion.camera_ok else str(fusion.camera_half_flips)
+    text(canvas, f"half-flips  switch {switch_half:3d}  camera {cam:>3}", (x + 12, yy), 0.42, GREY)
+    if fusion is not None and fusion.camera_ok and fusion.median_amplitude_deg:
+        text(canvas, f"median swing {fusion.median_amplitude_deg:4.0f} deg", (x + 12, yy + 20), 0.42, GREY)
+    if fusion is None:
+        status, col = "FUSION: waiting", DIM
+    elif not fusion.camera_ok:
+        status, col = "CAMERA LOST - switch only", WARN
+    elif fusion.locked:
+        status, col = "FUSION LOCKED \u2713", OK
+    else:
+        status, col = "FUSION MISMATCH - low confidence", WARN
+    text(canvas, status, (x + 12, y + h - 12), 0.45, col, 2)
 
 
 def rule_panel(canvas, x: int, y: int, w: int, h: int, title: str, explanation,

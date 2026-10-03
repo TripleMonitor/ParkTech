@@ -34,6 +34,7 @@ class HandFrame(NamedTuple):
     landmarks: Optional[np.ndarray]    # (21, 2) pixels, None = no hand found
     label: Optional[str]               # "Left"/"Right" as seen by MediaPipe
     score: Optional[float] = None      # MediaPipe hand confidence (0..1)
+    world: Optional[np.ndarray] = None # (21, 3) metres, MediaPipe world landmarks
 
     @property
     def distance(self) -> Optional[float]:
@@ -116,7 +117,10 @@ class CameraHand:
         h, w = frame.shape[:2]
         pts = np.array([[p.x * w, p.y * h] for p in res.multi_hand_landmarks[0].landmark])
         cls = res.multi_handedness[0].classification[0]
-        return HandFrame(frame, pts, cls.label, float(cls.score))
+        world = None
+        if res.multi_hand_world_landmarks:
+            world = np.array([[p.x, p.y, p.z] for p in res.multi_hand_world_landmarks[0].landmark])
+        return HandFrame(frame, pts, cls.label, float(cls.score), world)
 
     def measure_fps(self, n: int = 20) -> Optional[float]:
         """Boot check: time n raw frame reads (no inference)."""
@@ -167,6 +171,10 @@ _PALM = np.array([
     (320, 280), (320, 215), (320, 175), (320, 140),               # middle
     (360, 290), (370, 232), (375, 197), (378, 168),               # ring
     (395, 310), (410, 265), (418, 238), (424, 212)], float)
+_WORLD_PALM = np.zeros((21, 3))            # metres; fingers along -z, palm-down normal = +y
+for _i, _p in {5: (-0.03, 0.0, -0.085), 9: (0.0, 0.0, -0.09), 13: (0.02, 0.0, -0.085),
+               17: (0.035, 0.0, -0.07), 1: (-0.035, 0.0, -0.02), 8: (-0.03, 0.0, -0.17)}.items():
+    _WORLD_PALM[_i] = _p
 _TREMOR_DIR = np.array([np.cos(np.radians(20)), np.sin(np.radians(20))])
 _PX_PER_CM = _SCALE / 9.0      # tremor_analysis assumes wrist->middle-MCP = 9 cm
 
@@ -197,6 +205,12 @@ class FakeHand:
         self.tremor_hz = tremor_hz
         self.tremor_enabled = True
         self.telemetry = Telemetry()
+        # flipping: palm rotates towards 0 deg (switch = palm-down state) or flip_amp_deg
+        self.flip_state = None            # callable -> (state, palm_down_state) or None
+        self.flip_amp_deg = {"Right": 105.0, "Left": 165.0}
+        self.flip_amp_shrink = {"Right": 0.45, "Left": 0.0}
+        self._angle = 0.0
+        self._angle_t = None
         self._rng = random.Random(seed)
         self._seconds = test_seconds
         self._t0 = 0.0
@@ -240,7 +254,26 @@ class FakeHand:
             return HandFrame(frame, None, None)
         if test == "tremor":
             return HandFrame(frame, self.palm_at(now, hand), hand, 1.0)
+        if test == "flipping":
+            return self._flipping_frame(frame, now, hand)
         return HandFrame(frame, self.landmarks_for(self.distance_at(now, hand)), hand, 1.0)
+
+    def _flipping_frame(self, frame: np.ndarray, now: float, hand: str) -> HandFrame:
+        """Palm rotating about the forearm axis, following the (simulated) tilt switch."""
+        target = 0.0
+        if self.flip_state is not None:
+            state, down = self.flip_state()
+            frac = min(1.0, max(0.0, now - self._t0) / self._seconds)
+            amp = self.flip_amp_deg.get(hand, 160.0) * (1 - self.flip_amp_shrink.get(hand, 0.0) * frac)
+            target = amp if (state is not None and down is not None and state != down) else 0.0
+        dt = 0.0 if self._angle_t is None else max(0.0, now - self._angle_t)
+        self._angle_t = now
+        self._angle += (target - self._angle) * (1 - math.exp(-dt / 0.04))     # ~40 ms response
+        a = math.radians(self._angle + self._rng.uniform(-2, 2))
+        rot = np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
+        world = _WORLD_PALM @ rot.T
+        img = (_PALM - _PALM[WRIST]) * np.array([math.cos(a), 1.0]) + _PALM[WRIST]
+        return HandFrame(frame, img, hand, 1.0, world)
 
     def close(self) -> None:
         pass

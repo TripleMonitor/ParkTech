@@ -15,7 +15,7 @@ DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session
 FIELDS = ["timestamp", "session_id", "seeded",
           "tremor_R", "tremor_L", "tremor_R_cm", "tremor_L_cm", "tremor_R_hz", "tremor_L_hz",
           "tap_R", "tap_L", "tap_R_rate", "tap_L_rate", "tap_R_amp", "tap_L_amp",
-          "flip_R", "flip_L", "flip_R_rate", "flip_L_rate",
+          "flip_R", "flip_L", "flip_R_rate", "flip_L_rate", "flip_R_amp_deg", "flip_L_amp_deg",
           "asymmetry"]
 
 
