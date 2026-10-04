@@ -26,13 +26,16 @@ rhythm_coach, dashboard, fhir.
 |---|---|---|
 | SW-520D tilt switch | D2 | bare 2-leg: other leg to GND (INPUT_PULLUP); 3-pin module: DO→D2, VCC 5V, GND |
 | Onboard LED | D13 | mirrors the debounced switch state |
-| Buzzer | D8 | active or passive (#define BUZZER_PASSIVE) |
-| RGB LED | R D9, G D10, B D5 (PWM, via 220 Ω) | common cathode or anode (#define). Not D3/D11: tone() uses Timer2, which breaks PWM there |
-| LCD1602 parallel (optional) | RS D12, E D11, D4 D7, D5 D6, D6 D4, D7 D3; V0 to 10k pot middle | digital use only, no conflict with Timer2 |
+| Buzzer | D6 | active or passive (#define BUZZER_PASSIVE) |
+| 3 separate LEDs | green D9, yellow D10, red D11 (long leg via 220 Ω, short leg GND) | plain on/off; boot lights G→Y→R once to check the order |
+| LCD1602 parallel (optional, not fitted) | RS D12, E D8, D4 D7, D5 D5, D6 D4, D7 D3; V0 to 10k pot middle | digital use only |
 | LCD1602 I2C (optional) | SDA A4, SCL A5 | address 0x27 or 0x3F, auto-detected |
 | Serial | D0/D1 | USB |
-#defines: SWITCH_MODULE, BUZZER_PASSIVE, LED_COMMON_ANODE, LCD_MODE (NONE/I2C/PARALLEL).
-tools/check_pins.py verifies no pin conflicts; firmware/compile_all.sh builds all 24 variants.
+#defines: SWITCH_MODULE, BUZZER_PASSIVE, LCD_MODE (NONE/I2C/PARALLEL).
+tools/check_pins.py verifies no pin conflicts; firmware/compile_all.sh builds all 12 variants.
+This build: bare 2-leg SW-520D on D2, no LCD. LED,G|Y|R lights one LED (B = all three).
+Live LED during hand flipping = measured flip speed over the last 2 s (green >= 1.5 full
+flips/s, yellow >= 1.0, red below); after the session = worst score (green 0-1, yellow 2, red 3-4).
 
 ## Session flow
 Boot self-check -> Welcome (asks hours since last levodopa dose) -> Right tremor -> Left tremor
@@ -97,6 +100,12 @@ coach axis = rate / 4.0 beats/s demo reference). sessions.csv stores every sessi
 dose_hours and neuroscore. --seed-history: 14 days x 2 sessions, wearing-off pattern, right
 worse; seeded points drawn hollow and labeled DEMO DATA. Exports: P one-page PDF, F FHIR R4
 Bundle (Patient placeholder + Observations, LOCAL codes only, UCUM units, no LOINC).
+
+## Raw data + calibration
+`app.py --record [DIR] --label NAME` saves every test's raw signals (recorder.py, JSON).
+`tools/calibrate.py [DIR]` re-scores them with the current maths and suggests thresholds
+from normal (label contains normal/healthy/baseline) vs acted runs. Healthy-volunteer
+calibration only - not clinical validation. recordings/ and exports/ are git-ignored.
 
 ## Sim mode
 --sim: MockDevice (flip events; right impaired, left normal; metronome + SimulatedPatient for

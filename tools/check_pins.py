@@ -1,8 +1,8 @@
 """Static pin-conflict check for firmware/neurocheck/neurocheck.ino.
 
 Reads the pin constants and the parallel-LCD constructor from the sketch and checks,
-for every LCD mode, that no pin is used twice, nothing uses D0/D1 (USB serial), and
-the RGB LED avoids D3/D11 (no PWM while tone() holds Timer2 for a passive buzzer).
+for every LCD mode, that no pin is used twice and nothing uses D0/D1 (USB serial).
+The three LEDs are plain on/off (digitalWrite), so Timer2/tone() can't interfere.
 Exit code 0 = no conflicts.
 """
 from __future__ import annotations
@@ -31,12 +31,9 @@ def pins_from_sketch(text: str) -> tuple[dict[str, int], list[int]]:
 def check(text: str) -> list[str]:
     consts, lcd_par = pins_from_sketch(text)
     problems = []
-    led = [consts.get(k) for k in ("PIN_R", "PIN_G", "PIN_B")]
-    for p in led:
-        if p in TIMER2_PWM:
-            problems.append(f"RGB LED on D{p}: loses PWM while tone() uses Timer2")
-        if p not in UNO_PWM:
-            problems.append(f"RGB LED on D{p}: not a PWM pin")
+    for k in ("PIN_SWITCH", "PIN_BUZZER", "PIN_LED_GREEN", "PIN_LED_YELLOW", "PIN_LED_RED"):
+        if k not in consts:
+            problems.append(f"{k} not found in the sketch")
     for mode, extra in (("none", []), ("parallel", lcd_par), ("i2c", ["A4", "A5"])):
         used = list(consts.values()) + extra
         dupes = sorted({str(p) for p in used if used.count(p) > 1})

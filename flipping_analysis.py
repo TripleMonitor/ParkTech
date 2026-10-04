@@ -96,3 +96,23 @@ def analyze_flipping(times: Sequence[float], states: Sequence[int], t_start: flo
         flips_per_sec=(half / 2) / duration_s if duration_s > 0 else 0.0,
         interval_cv=cv, decrement=dec, hesitations=hes, duration_s=duration_s,
         first_change_s=first, flip_times=tuple(float(x) for x in ft))
+
+
+LIVE_WINDOW_S = 2.0
+LIVE_GREEN, LIVE_YELLOW = 1.5, 1.0     # full flips/s (demo thresholds, same as scoring "slow")
+
+
+def live_rate(flip_times: Sequence[float], elapsed: float, window: float = LIVE_WINDOW_S
+              ) -> Optional[float]:
+    """Full flips/s over the last `window` seconds (None until a full window exists)."""
+    if elapsed < window:
+        return None
+    n = sum(1 for t in flip_times if elapsed - window < t <= elapsed)
+    return (n / 2) / window
+
+
+def live_colour(rate: Optional[float]) -> Optional[str]:
+    """LED colour for the live flip speed: G >= 1.5, Y >= 1.0, else R (None = no window yet)."""
+    if rate is None:
+        return None
+    return "G" if rate >= LIVE_GREEN else "Y" if rate >= LIVE_YELLOW else "R"

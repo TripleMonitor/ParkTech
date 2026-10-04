@@ -102,3 +102,14 @@ def test_unsorted_input_is_sorted():
     f = analyze_flipping([times[i] for i in idx], [states[i] for i in idx],
                          t_start=100.0, duration_s=DUR, initial_state=0)
     assert f.flips_per_sec == pytest.approx(2.0, abs=0.1)
+
+
+def test_live_rate_and_colour():
+    from flipping_analysis import live_colour, live_rate
+    fast = [i * 0.25 for i in range(1, 40)]          # 2 full flips/s
+    assert live_rate(fast, 1.0) is None
+    assert live_rate(fast, 6.0) == pytest.approx(2.0)
+    assert live_colour(live_rate(fast, 6.0)) == "G"
+    slow = [i * 0.4 for i in range(1, 30)]           # 1.25 full flips/s
+    assert live_colour(live_rate(slow, 6.0)) == "Y"
+    assert live_colour(live_rate([], 6.0)) == "R"    # stopped

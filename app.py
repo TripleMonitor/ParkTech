@@ -32,7 +32,8 @@ from boot import BootChecks
 from coach_session import CoachSession
 from dashboard import neuroscore, radar_image
 from quality import SignalQuality, signal_quality
-from flipping_analysis import FlippingFeatures, analyze_flipping, debounce
+from flipping_analysis import (FlippingFeatures, analyze_flipping, debounce, live_colour,
+                               live_rate)
 from fusion import FusionResult, current_angle, fuse, palm_normal
 from scoring import (ScoreResult, explain_flipping, explain_tapping, explain_tremor,
                      flipping_asymmetry, score_flipping, score_tapping, score_tremor,
@@ -106,9 +107,12 @@ def fingertip_cm(lm: Optional[np.ndarray]) -> Optional[np.ndarray]:
 class App:
     def __init__(self, device, hands, seconds: float = 10.0,
                  history_path: str = history.DEFAULT_PATH, clock=time.perf_counter,
-                 boot: Optional[BootChecks] = None):
+                 boot: Optional[BootChecks] = None, raw_dir: Optional[str] = None,
+                 label: str = ""):
         self.device, self.hands, self.seconds = device, hands, seconds
         self.history_path = history_path
+        self.raw_dir, self.label = raw_dir, label     # --record: save raw data per test
+        self.raw_msg = ""
         self.clock = clock          # perf_counter: monotonic() is 15.6 ms on Windows
         self.running = True
         self.boot = boot
@@ -178,6 +182,7 @@ class App:
         self.fusion: Optional[FusionResult] = None
         self.flip_angle: Optional[float] = None
         self._fuse_at = 0.0
+        self._live_led: Optional[str] = None
 
     @property
     def test(self) -> tuple[str, str]:
@@ -194,6 +199,7 @@ class App:
         """Ready screen for self.test: fresh live views (no data from the previous test)."""
         self._goto("ready", now)
         self._clear_live()
+        self.device.led("OFF")
         self._lcd_test("SPACE to start")
         if self.test[0] == "flipping":
             self._lcd_test("Palm DOWN, SPACE")
@@ -236,7 +242,33 @@ class App:
             self.results[self.test] = self._flipping_result(hand)
         score = self.results[self.test].result.score
         self._lcd_test(f"Score {'-' if score is None else score}")
+        if self.raw_dir:
+            self._save_raw(kind, hand)
         self._goto("done", now)
+
+    def _save_raw(self, kind: str, hand: str) -> None:
+        """--record: write this test's raw signals so tools/calibrate.py can re-score them."""
+        from recorder import build_record, save_record
+        try:
+            data = {"q_t": self.q_t, "q_det": self.q_det, "q_score": self.q_score}
+            if kind == "tremor":
+                data.update(t=self.trem_t, landmarks=self.trem_lm)
+            elif kind == "tapping":
+                data.update(t=self.tap_t, d=self.tap_d)
+            else:
+                data.update(events=[(e.t, e.state) for e in self.events], rec_start=self.rec_start,
+                            calib=self.calib, cam_t=self.fl_t, world=self.fl_world,
+                            ref_normal=self.flip_ref)
+            meta = {"session_id": self.session_id, "label": self.label, "hand": hand,
+                    "seconds": self.seconds, "timestamp": self.started_at,
+                    "mode": "LIVE" if not (self.sim_hand or self.sim_dev) else "SIM",
+                    "dose_hours": self.dose_hours}
+            r = self.results[(kind, hand)].result
+            path = save_record(self.raw_dir, build_record(meta, kind, data, r.score, r.reasons))
+            self.raw_msg = f"raw data saved: {os.path.basename(path)}"
+        except Exception as exc:                  # recording must never break a test
+            log.exception("raw save failed")
+            self.raw_msg = f"raw data NOT saved: {exc}"
 
     def _final_quality(self) -> SignalQuality:
         tel = getattr(self.hands, "telemetry", None)
@@ -574,6 +606,10 @@ class App:
                 self.device_lost |= not self.device.connected
                 self._update_live_flips(now)
                 self._update_fusion()
+                colour = live_colour(live_rate(self.flip_times, self.clock() - self.rec_start))
+                if colour is not None and colour != self._live_led:
+                    self._live_led = colour          # LED follows the measured flip speed
+                    self.device.led(colour)
             else:
                 self.device.drain()                  # discard stray reports before START
                 if self.clock() - self._poll_at >= 0.2:
@@ -894,6 +930,9 @@ class App:
         self._test_title(c)
         tr = self.results[self.test]
         self._draw_done_left(c, tr)
+        if self.raw_dir:
+            ui.text(c, ("REC " + self.label + " | " if self.label else "REC | ") + self.raw_msg,
+                    (20, 670), 0.42, ui.REC if "NOT" in self.raw_msg else ui.OK)
         ui.rule_panel(c, 760, 125, 500, 420, f"{tr.hand} - {TITLES[tr.kind]}", self._explain(tr),
                       flag="LOW CONFIDENCE" if tr.low_confidence else "")
         if self.idx + 1 < len(TESTS):
@@ -1030,6 +1069,10 @@ def parse_args(argv=None):
                    help=f"recording length per test, {MIN_TEST_S:g}-{MAX_TEST_S:g} (default 10)")
     p.add_argument("--history", default=history.DEFAULT_PATH)
     p.add_argument("--no-boot", action="store_true", help="skip the boot self-check screen")
+    p.add_argument("--record", nargs="?", const="recordings", default=None, metavar="DIR",
+                   help="save raw data of every test to DIR (default: recordings/)")
+    p.add_argument("--label", default="", help="label for recordings, e.g. alex_normal, "
+                                               "alex_acted_tremor (used by tools/calibrate.py)")
     return p.parse_args(argv)
 
 
@@ -1082,7 +1125,8 @@ def main(argv=None) -> None:
     device, hands = build(args)
     warm_up_matplotlib()
     boot = None if args.no_boot else BootChecks(device, hands).start()
-    app = App(device, hands, args.seconds, args.history, boot=boot)
+    app = App(device, hands, args.seconds, args.history, boot=boot, raw_dir=args.record,
+              label=args.label)
     app.restart(app.clock())
     if boot is not None:
         app.state = "boot"

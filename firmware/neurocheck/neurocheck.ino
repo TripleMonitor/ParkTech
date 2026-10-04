@@ -1,5 +1,6 @@
 // NeuroCheck firmware - Arduino Uno
-// SW-520D tilt switch (hand flipping), buzzer, RGB LED, optional LCD1602. No IMU.
+// SW-520D tilt switch (hand flipping), buzzer, 3 separate LEDs (green/yellow/red),
+// optional LCD1602. No IMU.
 //
 // Serial 115200, newline-terminated:
 //   Arduino -> PC:  READY (boot)
@@ -13,10 +14,11 @@
 // Pin table (no conflicts; see CLAUDE.md / README):
 //   D2  SW-520D (bare 2-leg: other leg to GND, INPUT_PULLUP | 3-pin module: DO, VCC 5V, GND)
 //   D13 onboard LED mirrors the debounced switch state
-//   D8  buzzer
-//   D9 R, D10 G, D5 B   RGB LED via 220 ohm (PWM on Timer1/Timer0; NOT D3/D11, which lose
-//                       PWM while tone() uses Timer2 for a passive buzzer)
-//   LCD parallel: RS D12, E D11, D4 D7, D5 D6, D6 D4, D7 D3 (digital only) | LCD I2C: A4/A5
+//   D6  buzzer
+//   D9 green, D10 yellow, D11 red   separate LEDs, long leg -> pin via 220 ohm, short leg -> GND
+//                       (plain on/off, so tone() on Timer2 can't interfere)
+//   LCD parallel: RS D12, E D8, D4 D7, D5 D5, D6 D4, D7 D3 (digital only) | LCD I2C: A4/A5
+//   On boot the LEDs light green -> yellow -> red once, so you can check the pin order.
 //
 // ---- configuration: edit here, or override with -D flags ----------------------------
 #ifndef SWITCH_MODULE
@@ -24,9 +26,6 @@
 #endif
 #ifndef BUZZER_PASSIVE
 #define BUZZER_PASSIVE 0        // 0 = active buzzer (sticker, sealed bottom), 1 = passive (board visible)
-#endif
-#ifndef LED_COMMON_ANODE
-#define LED_COMMON_ANODE 0      // 0 = common cathode (long leg to GND), 1 = common anode (long leg to 5V)
 #endif
 #define LCD_NONE 0
 #define LCD_I2C 1
@@ -45,8 +44,8 @@
 
 const uint8_t PIN_SWITCH = 2;
 const uint8_t PIN_MIRROR = 13;
-const uint8_t PIN_BUZZER = 8;
-const uint8_t PIN_R = 9, PIN_G = 10, PIN_B = 5;
+const uint8_t PIN_BUZZER = 6;
+const uint8_t PIN_LED_GREEN = 9, PIN_LED_YELLOW = 10, PIN_LED_RED = 11;
 const unsigned long DEBOUNCE_MS = 30;
 const unsigned int BEEP_HZ = 2400, BEEP_ON_MS = 90, BEEP_OFF_MS = 90;
 const uint8_t CMD_MAX = 48;                // "LCD," + 16 + "|" + 16 fits
@@ -54,7 +53,7 @@ const uint8_t CMD_MAX = 48;                // "LCD," + 16 + "|" + 16 fits
 #if LCD_MODE == LCD_I2C
 LiquidCrystal_I2C *lcd = nullptr;
 #elif LCD_MODE == LCD_PARALLEL
-LiquidCrystal lcdPar(12, 11, 7, 6, 4, 3);  // RS, E, D4, D5, D6, D7
+LiquidCrystal lcdPar(12, 8, 7, 5, 4, 3);   // RS, E, D4, D5, D6, D7
 #endif
 bool lcdOk = false;
 
@@ -108,21 +107,18 @@ void updateSwitch() {
   }
 }
 
-// ---------------------------------------------------------------- LED (PWM)
-void ledWrite(uint8_t pin, uint8_t level) {
-  analogWrite(pin, LED_COMMON_ANODE ? 255 - level : level);
+// ---------------------------------------------------------------- LEDs (3 separate)
+void ledsRaw(bool g, bool y, bool r) {
+  digitalWrite(PIN_LED_GREEN, g ? HIGH : LOW);
+  digitalWrite(PIN_LED_YELLOW, y ? HIGH : LOW);
+  digitalWrite(PIN_LED_RED, r ? HIGH : LOW);
 }
 
 void setLed(const char *c) {
+  // G / Y / R light one LED; B (legacy "blue") lights all three; anything else = off
   strncpy(ledColour, c, sizeof(ledColour) - 1);
-  uint8_t r = 0, g = 0, b = 0;
-  if (strcmp(c, "R") == 0) r = 255;
-  else if (strcmp(c, "G") == 0) g = 255;
-  else if (strcmp(c, "Y") == 0) { r = 255; g = 110; }   // PWM mix for a real yellow
-  else if (strcmp(c, "B") == 0) b = 255;
-  ledWrite(PIN_R, r);
-  ledWrite(PIN_G, g);
-  ledWrite(PIN_B, b);
+  bool all = strcmp(c, "B") == 0;
+  ledsRaw(all || strcmp(c, "G") == 0, all || strcmp(c, "Y") == 0, all || strcmp(c, "R") == 0);
 }
 
 // ---------------------------------------------------------------- buzzer (non-blocking)
@@ -163,12 +159,6 @@ unsigned long clampCue(long ms) {
   return (unsigned long)ms;
 }
 
-void ledRaw(uint8_t r, uint8_t g, uint8_t b) {
-  ledWrite(PIN_R, r);
-  ledWrite(PIN_G, g);
-  ledWrite(PIN_B, b);
-}
-
 void updateCue() {
   unsigned long now = millis();
   if (cueClicking && (long)(now - cueClickOffMs) >= 0) {     // end of click + flash
@@ -184,7 +174,7 @@ void updateCue() {
   cueNextMs = beat + cueIntervalMs;
   if ((long)(now - cueNextMs) >= 0) cueNextMs = now + cueIntervalMs;   // never burst-catch-up
   buzzer(true);
-  ledRaw(255, 255, 255);
+  ledsRaw(true, true, true);                                 // beat flash: all three LEDs
   cueClicking = true;
   cueClickOffMs = now + CUE_CLICK_MS;
   Serial.print(F("C,"));
@@ -293,10 +283,13 @@ void setup() {
 #endif
   pinMode(PIN_MIRROR, OUTPUT);
   pinMode(PIN_BUZZER, OUTPUT);
-  pinMode(PIN_R, OUTPUT);
-  pinMode(PIN_G, OUTPUT);
-  pinMode(PIN_B, OUTPUT);
+  pinMode(PIN_LED_GREEN, OUTPUT);
+  pinMode(PIN_LED_YELLOW, OUTPUT);
+  pinMode(PIN_LED_RED, OUTPUT);
   buzzer(false);
+  ledsRaw(true, false, false); delay(300);   // boot check: green -> yellow -> red
+  ledsRaw(false, true, false); delay(300);   // (setup only; the main loop never blocks)
+  ledsRaw(false, false, true); delay(300);
   setLed("OFF");
   rawState = stableState = readSwitch();
   rawChangedMs = millis();

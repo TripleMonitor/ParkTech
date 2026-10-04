@@ -30,29 +30,32 @@ Always run Python as `.venv\Scripts\python` (plain `python` may be a different v
 |---|---|---|
 | SW-520D bare 2-leg switch | leg 1 / leg 2 | D2 / GND (internal pull-up) |
 | SW-520D 3-pin module | VCC / GND / DO | 5V / GND / D2 |
-| Buzzer | + (long leg / red) / − | D8 / GND |
-| RGB LED | R / G / B (each via 220 Ω) | D9 / D10 / D5 |
-| RGB LED | common (longest leg) | GND if common-cathode, 5V if common-anode |
+| Buzzer | + (long leg / red) / − | D6 / GND |
+| Green LED | long leg via 220 Ω / short leg | D9 / GND |
+| Yellow LED | long leg via 220 Ω / short leg | D10 / GND |
+| Red LED | long leg via 220 Ω / short leg | D11 / GND |
 | LCD1602 I2C *(optional)* | VCC / GND / SDA / SCL | 5V / GND / A4 / A5 |
-| LCD1602 parallel *(optional)* | RS / E / D4 / D5 / D6 / D7 | D12 / D11 / D7 / D6 / D4 / D3 |
+| LCD1602 parallel *(optional)* | RS / E / D4 / D5 / D6 / D7 | D12 / D8 / D7 / D5 / D4 / D3 |
 | LCD1602 parallel | VSS / VDD / RW / K | GND / 5V / GND / GND |
 | LCD1602 parallel | A (backlight +) | 5V via 220 Ω |
 | LCD1602 parallel | V0 (contrast) | middle of a 10 kΩ pot (outer pins 5V / GND) |
 
 The onboard LED (D13) mirrors the tilt switch, so you can check the sensor without the app.
-Blue is on D5 (not D11): a passive buzzer's `tone()` uses Timer2 and kills PWM on D3/D11.
-`tools/check_pins.py` proves there are no pin conflicts.
+On power-up the LEDs light green → yellow → red once: if the order is wrong, swap the three
+`PIN_LED_*` numbers at the top of the sketch. `tools/check_pins.py` proves there are no pin conflicts.
+During hand flipping the LEDs show your live flip speed (green fast, yellow medium, red slow);
+after the session they show the overall result.
 
 ## 3. Configure + upload firmware
-Edit the four `#define`s at the top of `firmware/neurocheck/neurocheck.ino`:
+Edit the three `#define`s at the top of `firmware/neurocheck/neurocheck.ino`:
 `SWITCH_MODULE` (0 bare switch / 1 3-pin module), `BUZZER_PASSIVE` (0 active: sticker, sealed
-bottom / 1 passive: green board visible), `LED_COMMON_ANODE` (0/1),
-`LCD_MODE` (`LCD_NONE` / `LCD_I2C` / `LCD_PARALLEL`). Everything works with no LCD.
+bottom / 1 passive: green board visible), `LCD_MODE` (`LCD_NONE` / `LCD_I2C` / `LCD_PARALLEL`).
+Everything works with no LCD.
 ```powershell
 arduino-cli board list                                   # find the COM port
 arduino-cli compile --fqbn arduino:avr:uno firmware\neurocheck
 arduino-cli upload  --fqbn arduino:avr:uno -p COM5 firmware\neurocheck
-bash firmware/compile_all.sh                             # all 24 #define combinations + pin check
+bash firmware/compile_all.sh                             # all 12 #define combinations + pin check
 ```
 Close the app (or any serial monitor) before uploading — only one program can own the port.
 
@@ -75,6 +78,17 @@ Close the app (or any serial monitor) before uploading — only one program can 
 Sim only: **T** toggle fake tremor, **F** fake stuck sensor (during tests).
 
 Exports land in `exports/` next to `sessions.csv`.
+
+## 4b. Record raw data and calibrate (more accuracy for YOUR setup)
+```powershell
+.venv\Scripts\python app.py --record --label alex_normal         # healthy volunteer, normal effort
+.venv\Scripts\python app.py --record --label alex_acted_tremor   # same person acting a symptom
+.venv\Scripts\python tools\calibrate.py                          # report + suggested thresholds
+```
+Do 2-3 normal runs per person with 3-5 people, plus a few acted runs (5 Hz shake, slow or small
+taps, slow/small flips). The report shows false alarms (normal runs scoring > 0), misses (acted
+runs scoring 0) and suggested thresholds. This tunes the app to your camera, lighting and sensor;
+it is not clinical validation (that needs patients scored by a neurologist).
 
 ## 5. Screens
 1. **Boot self-check** — camera + FPS, MediaPipe load time, Arduino port, READY, STATE round

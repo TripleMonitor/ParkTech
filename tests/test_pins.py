@@ -7,5 +7,6 @@ def test_firmware_has_no_pin_conflicts():
 
 def test_checker_catches_conflicts():
     text = INO.read_text(encoding="utf-8")
-    assert check(text.replace("PIN_B = 5", "PIN_B = 11"))            # Timer2 PWM pin
-    assert check(text.replace("lcdPar(12, 11, 7, 6, 4, 3)", "lcdPar(12, 11, 7, 6, 4, 2)"))  # D2 twice
+    assert check(text.replace("PIN_LED_RED = 11", "PIN_LED_RED = 6"))     # same pin as buzzer
+    assert check(text.replace("lcdPar(12, 8, 7, 5, 4, 3)", "lcdPar(12, 8, 7, 5, 4, 2)"))  # D2 twice
+    assert check(text.replace("PIN_LED_GREEN = 9", "PIN_LED_GRN = 9"))      # missing pin
