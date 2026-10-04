@@ -14,7 +14,11 @@ void setup() {
   Serial.begin(115200);
   pinMode(13, OUTPUT);
   for (uint8_t i = 0; i < N; i++) {
-    pinMode(PINS[i], INPUT_PULLUP);
+#ifdef NO_PULLUP
+    pinMode(PINS[i], INPUT);         // finds switches wired 5V -> switch -> pin (+ pull-down)
+#else
+    pinMode(PINS[i], INPUT_PULLUP);  // finds switches wired pin -> switch -> GND
+#endif
     stable[i] = raw[i] = digitalRead(PINS[i]);
     changed[i] = 0;
   }
