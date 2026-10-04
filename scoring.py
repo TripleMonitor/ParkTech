@@ -21,10 +21,13 @@ TREMOR_CUTS_CM = (1.0, 3.0, 10.0)
 MIN_DATA_FRACTION = 0.8      # a recording must cover 80% of the planned test
 
 # Finger tapping
-TAP_SLOW = 2.0               # taps/s
-TAP_SMALL = 0.5              # normalised amplitude
+# Tuned on the HUBU-FIS dataset (234 clinician-rated videos, 118 people; Zenodo
+# 10.5281/zenodo.17738775) with participant-level 5-fold CV: tools/hubu_eval.py --tune.
+# CV agreement with clinicians: exact 45%, within-1 85%, weighted kappa 0.49.
+TAP_SLOW = 1.5               # taps/s     (was 2.0 - healthy controls tap ~1.3-1.7/s)
+TAP_SMALL = 0.8              # normalised amplitude (was 0.5)
 TAP_DECREMENT = 0.30
-TAP_IRREGULAR_CV = 0.30
+TAP_IRREGULAR_CV = 0.50      # (was 0.30)
 TAP_MIN_TAPS = 5
 TAP_MIN_VISIBLE = 0.5
 

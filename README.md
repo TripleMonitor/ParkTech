@@ -110,12 +110,36 @@ it is not clinical validation (that needs patients scored by a neurologist).
 - **Tremor** (3.17 style): fingertip in cm (hand wrist→middle-MCP = 9 cm), 30 Hz, 1 Hz high-pass,
   FFT x+y, clear peak 3–8 Hz (≥ 3× median, local max), band-limited amplitude.
   0: < 0.1 cm / no peak · 1: < 1 · 2: 1–3 · 3: 3–10 · 4: ≥ 10 cm.
-- **Finger tapping** (3.4 style): slow < 2 taps/s, small < 0.5, decrement > 30 %, CV > 0.3,
-  any hesitation → score = problems (max 3); < 5 taps → 4.
+- **Finger tapping** (3.4 style): slow < 1.5 taps/s, small < 0.8, decrement > 30 %, CV > 0.5,
+  any hesitation → score = problems (max 3); < 5 taps → 4. Thresholds tuned on a public
+  clinician-rated dataset — see *Validation on real patients* below.
 - **Hand flipping** (3.6 style): slow < 1.5 full flips/s, CV > 0.35, slowdown > 25 %, any
   hesitation, small rotation < 120°, rotation shrink > 25 % → problems (max 3); < 5 flips → 4.
 - **Asymmetry**: ≥ 1 point, or ≥ 25 % on taps/s, flips/s or tremor cm.
 - **NeuroScore** = 100 × (1 − Σ scores / (4 × scored tests)). Composite tracking index.
+
+## 6b. Validation on real patients (finger tapping)
+Public **HUBU-FIS** dataset (University of Burgos; Zenodo 10.5281/zenodo.17738775, CC-BY-4.0):
+234 phone videos, 118 people (controls + Parkinson's), each hand rated by clinicians on
+MDS-UPDRS 3.4. The app's own MediaPipe settings and tapping maths were run on every video:
+
+| Thresholds | exact match | within 1 point | weighted kappa |
+|---|---|---|---|
+| original demo thresholds | 42 % | 85 % | 0.47 |
+| tuned, 5-fold cross-validated by participant (honest) | 45 % | 85 % | 0.49 |
+
+![validation](docs/hubu_validation.png)
+
+Reproduce (10.8 GB download, ~25 min MediaPipe pass):
+```powershell
+.venv\Scripts\python toolsetch_parallel.py "https://zenodo.org/api/records/17738775/files/HUBU-FIS_FT.zip/content" datasets\hubu\HUBU-FIS_FT.zip
+# unzip to datasets\hubu\extracted, build datasets\hubu\labels.csv (video,participant,rating)
+.venv\Scripts\python tools\hubu_extract.py datasets\hubu\extracted datasets\hubu\cache 12
+.venv\Scripts\python tools\hubu_eval.py datasets\hubu\labels.csv datasets\hubu\cache --tune
+```
+Only finger tapping is validated this way; the tremor and hand-flipping thresholds are still
+demo thresholds. Moderate agreement (kappa ~0.5) is the honest headline: useful for tracking
+change, not for diagnosis.
 
 ## 7. Demo script
 See the summary in `VERIFICATION.md` and the 3-minute script given with this build.

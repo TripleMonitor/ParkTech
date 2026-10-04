@@ -79,6 +79,18 @@ probing, random misses excluded / misses after a late beat counted.
 | LOW | sim stuck-sensor toggle invisible; spectrum annotated without a clear peak; docstring 7 days; R ignored on boot; MediaPipe exceptions | indicator added; "no clear tremor peak"; fixed; R works on boot; exceptions caught |
 | LOW (kept) | coach run started from Results adds a second, partial CSV row (same session ID); matplotlib renders (~0.3–1 s) on the UI thread for dashboard/trend/PDF; I2C LCD write blocks the loop for a few ms | accepted for the demo |
 
+## Validation on real patients (finger tapping, HUBU-FIS)
+234 clinician-rated videos, 118 people, MDS-UPDRS 3.4 per hand (Zenodo 10.5281/zenodo.17738775,
+CC-BY-4.0). App's MediaPipe settings + tapping maths, participant-level 5-fold CV.
+| Thresholds | exact | within 1 | weighted kappa | clinician-0 clips scored 0 |
+|---|---|---|---|---|
+| original demo | 42 % | 85 % | 0.47 | 17 / 71 |
+| tuned (CV) | 45 % | 85 % | 0.49 | 34 / 71 |
+Applied to the app: slow < 1.5 taps/s, small < 0.8, CV > 0.5 (decrement unchanged 30 %).
+Tap detection checked visually: `docs/hubu_validation.png`. Full output: `verification/hubu_eval.txt`.
+Limitations: phone videos (20 s, 30 fps) vs the app's 10 s webcam test; one dataset, one site;
+tremor and flipping thresholds NOT validated on patients.
+
 ## Not verifiable without hardware (do these in bring-up)
 - Real SW-520D behaviour: bounce pattern, orientation of "closed", 30 ms firmware debounce
   in practice, whether D13 mirrors every flip.

@@ -62,8 +62,12 @@ UI note: "Camera tremor: may miss very small tremors (< ~0.5 cm)".
 
 ## Finger tapping (webcam, MDS-UPDRS 3.4 style, demo thresholds)
 Distance = thumb-tip(4) to index-tip(8) / wrist(0)-middle-MCP(9). Taps = openings (prominence
->= 0.15). Problems: slow (<2 taps/s), small amplitude (<0.5), decrement >30% (first vs last 3 s),
-irregular (CV >0.3), any hesitation (interval > 2x median). Tracking gaps > 0.15 s are excluded
+>= 0.15). Problems: slow (<1.5 taps/s), small amplitude (<0.8), decrement >30% (first vs last 3 s),
+irregular (CV >0.5), any hesitation (interval > 2x median).
+Thresholds tuned on the HUBU-FIS dataset (234 clinician-rated videos, 118 people, Zenodo
+10.5281/zenodo.17738775, CC-BY-4.0) with participant-level 5-fold CV (tools/hubu_eval.py):
+agreement with clinicians exact 45%, within 1 point 85%, weighted kappa 0.49 (original
+demo thresholds: 42% / 85% / 0.47). Dataset lives in datasets/ (git-ignored). Tracking gaps > 0.15 s are excluded
 from rhythm. Score: problems count capped at 3; 4 if fewer than 5 taps.
 
 ## Hand flipping (SW-520D + camera fusion, MDS-UPDRS 3.6 style, demo thresholds)

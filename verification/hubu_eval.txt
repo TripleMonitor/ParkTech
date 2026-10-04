@@ -1,0 +1,31 @@
+234 labelled clips from 118 participants (0 cached clips without a label)
+clinician rating counts: {0: 71, 1: 99, 2: 38, 3: 26, 4: 0}
+
+== CURRENT demo thresholds {'TAP_SLOW': 2.0, 'TAP_SMALL': 0.5, 'TAP_DECREMENT': 0.3, 'TAP_IRREGULAR_CV': 0.3}
+  unscored (hand seen < 50%): 1
+  n 233, exact 0.416, within1 0.854, qwk 0.469, spearman 0.414, mae 0.738
+clinician \ app    0    1    2    3    4
+              0   17   30   22    2    0
+              1    7   46   36    9    0
+              2    0    8   16   14    0
+              3    0    1    7   18    0
+              4    0    0    0    0    0
+
+== CROSS-VALIDATED tuning (5 folds by participant; honest estimate)
+  n 233, exact 0.446, within1 0.850, qwk 0.491, spearman 0.447, mae 0.717
+clinician \ app    0    1    2    3    4
+              0   34   25   10    2    0
+              1   23   45   18   12    0
+              2    6    6   10   16    0
+              3    1    4    6   15    0
+              4    0    0    0    0    0
+  thresholds chosen per fold:
+    {'TAP_SLOW': 1.5, 'TAP_SMALL': 0.8, 'TAP_DECREMENT': 0.3, 'TAP_IRREGULAR_CV': 0.5}
+    {'TAP_SLOW': 1.25, 'TAP_SMALL': 0.8, 'TAP_DECREMENT': 0.3, 'TAP_IRREGULAR_CV': 0.3}
+    {'TAP_SLOW': 1.5, 'TAP_SMALL': 0.8, 'TAP_DECREMENT': 0.2, 'TAP_IRREGULAR_CV': 0.5}
+    {'TAP_SLOW': 1.25, 'TAP_SMALL': 0.8, 'TAP_DECREMENT': 0.5, 'TAP_IRREGULAR_CV': 0.2}
+    {'TAP_SLOW': 1.5, 'TAP_SMALL': 0.8, 'TAP_DECREMENT': 0.5, 'TAP_IRREGULAR_CV': 0.3}
+
+== FINAL thresholds tuned on ALL clips (use these; quote the CV numbers above)
+   {'TAP_SLOW': 1.5, 'TAP_SMALL': 0.8, 'TAP_DECREMENT': 0.3, 'TAP_IRREGULAR_CV': 0.5}
+  in-sample (optimistic): n 233, exact 0.485, within1 0.876, qwk 0.551, spearman 0.494, mae 0.644

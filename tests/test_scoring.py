@@ -73,7 +73,7 @@ def test_tapping_flat_scores_4():
 
 
 def test_tapping_problem_count_caps_at_3():
-    r = score_tapping(TappingFeatures(20, 1.5, 0.3, 0.5, 0.5, 2, 1.0, 10.0))
+    r = score_tapping(TappingFeatures(20, 1.0, 0.3, 0.5, 0.7, 2, 1.0, 10.0))   # 5 problems
     assert r.score == 3 and len(r.reasons) == 5
 
 
