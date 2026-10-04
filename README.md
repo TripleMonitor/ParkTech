@@ -46,7 +46,7 @@ On power-up the LEDs light green → yellow → red once: if the order is wrong,
 During hand flipping the LEDs show your live flip speed (green fast, yellow medium, red slow);
 after the session they show the overall result.
 
-## 3. Configure + upload firmware
+## 3. Configure and upload firmware
 Edit the three `#define`s at the top of `firmware/neurocheck/neurocheck.ino`:
 `SWITCH_MODULE` (0 bare switch / 1 3-pin module), `BUZZER_PASSIVE` (0 active: sticker, sealed
 bottom / 1 passive: green board visible), `LCD_MODE` (`LCD_NONE` / `LCD_I2C` / `LCD_PARALLEL`).
