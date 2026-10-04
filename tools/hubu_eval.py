@@ -44,9 +44,31 @@ def trim(t: np.ndarray, d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return t[ok[0]:ok[-1] + 1], d[ok[0]:ok[-1] + 1]
 
 
+ACTIVE_PAD_S = 0.5
+
+
+def active_segment(t: np.ndarray, d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Crop to the tapping itself: first detected tap - 0.5 s .. last tap + 0.5 s.
+
+    The dataset clips are ~20 s and include idle time before/after tapping; the app's test
+    is 10 s of tapping only, so rates must be measured over the active period.
+    """
+    from tapping_analysis import detect_taps
+    ok = ~np.isnan(d)
+    if ok.sum() < 10:
+        return t, d
+    tap_t, _ = detect_taps(t[ok], d[ok])
+    if len(tap_t) < 2:
+        return t, d
+    a, b = t[ok][0] + tap_t[0] - ACTIVE_PAD_S, t[ok][0] + tap_t[-1] + ACTIVE_PAD_S
+    keep = (t >= a) & (t <= b)
+    return t[keep], d[keep]
+
+
 def features_from_cache(path: str) -> TappingFeatures:
     z = np.load(path, allow_pickle=False)
     t, d = trim(np.asarray(z["t"], float), np.asarray(z["d"], float))
+    t, d = active_segment(t, d)
     return analyze_tapping(list(t), [None if np.isnan(x) else float(x) for x in d])
 
 

@@ -43,8 +43,9 @@ def extract(args) -> str:
         return f"skip {os.path.basename(video)}"
     cap = cv2.VideoCapture(video)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    # SAME settings as the live app (tapping_tracker.CameraHand) so we evaluate the app as it runs
     hands = mp.solutions.hands.Hands(static_image_mode=False, max_num_hands=1,
-                                     model_complexity=1, min_detection_confidence=0.5,
+                                     model_complexity=0, min_detection_confidence=0.6,
                                      min_tracking_confidence=0.5)
     t, d, score, label = [], [], [], []
     i = 0
@@ -53,8 +54,8 @@ def extract(args) -> str:
         if not ok:
             break
         h, w = frame.shape[:2]
-        if max(h, w) > 1280:                       # speed: MediaPipe doesn't need 1080x1920
-            s = 1280 / max(h, w)
+        if max(h, w) > 640:                        # like the app's 640x480 webcam frames
+            s = 640 / max(h, w)
             frame = cv2.resize(frame, (int(w * s), int(h * s)))
             h, w = frame.shape[:2]
         res = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
