@@ -64,8 +64,9 @@ def telemetry(c, hands, device, sim_hand: bool, sim_dev: bool) -> None:
         ("INFER", "SIM" if sim_hand else f"{_fmt(inf, '5.1f')} ms", ui.WARN if sim_hand else ui.WHITE),
         ("SERIAL", f"{link} {device.packets_per_sec:4.0f} pkt/s",
          ui.WARN if sim_dev else (ui.OK if device.connected else ui.REC)),
-        ("TILT", ("?" if device.state is None or not getattr(device, "state_fresh", True)
-                  else str(device.state)) + (" SIM" if sim_dev else ""),
+        ("TILT", (getattr(device, "last_status", "")[:26] or "--") if getattr(device, "closures_only", False)
+         else ("?" if device.state is None or not getattr(device, "state_fresh", True)
+               else str(device.state)) + (" SIM" if sim_dev else ""),
          ui.WARN if sim_dev else ui.WHITE),
         ("MODE", "SIMULATION" if (sim_hand or sim_dev) else "LIVE",
          ui.WARN if (sim_hand or sim_dev) else ui.OK),

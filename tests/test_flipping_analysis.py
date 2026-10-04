@@ -113,3 +113,16 @@ def test_live_rate_and_colour():
     slow = [i * 0.4 for i in range(1, 30)]           # 1.25 full flips/s
     assert live_colour(live_rate(slow, 6.0)) == "Y"
     assert live_colour(live_rate([], 6.0)) == "R"    # stopped
+
+
+def test_closures_only_mode():
+    from flipping_analysis import analyze_closures
+    steady = [100.0 + 0.5 * k for k in range(1, 21)]            # 2 full flips/s
+    f = analyze_closures(steady, 100.0, 10.0)
+    assert f.full_flips == 20 and f.half_flips == 40
+    assert f.flips_per_sec == pytest.approx(2.0) and f.interval_cv < 0.01 and f.hesitations == 0
+    bouncy = sorted(steady + [t + 0.02 for t in steady[::3]])    # bounce closures 20 ms later
+    assert analyze_closures(bouncy, 100.0, 10.0).full_flips == 20
+    paused = [t for t in steady if not (104.0 < t < 105.6)]
+    assert analyze_closures(paused, 100.0, 10.0).hesitations == 1
+    assert analyze_closures([], 100.0, 10.0).first_change_s is None

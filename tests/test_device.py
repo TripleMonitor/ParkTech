@@ -138,3 +138,29 @@ def test_clock_mapper_tracks_slow_arduino_clock():
     for k in range(0, 601):                       # one report per second for 10 min
         m.observe(k * 1000 * 0.998, 1000.0 + k + 0.003)
     assert m.to_pc(600 * 1000 * 0.998) == pytest.approx(1600.0, abs=0.05)
+
+
+def test_parse_og_lines():
+    from device import parse_og_line
+    assert parse_og_line("Interval: 163 ms\r\n") == ("interval", 163.0)
+    assert parse_og_line(b"Interval: 0 ms\n") == ("interval", 0.0)
+    assert parse_og_line("[!] Tremor Detected (Fast)") == ("status", None)
+    assert parse_og_line("Parkinson's Tremor Monitor Active.") == ("banner", None)
+    for bad in ("", "Interval: x ms", "Interval: -5 ms", "garbage"):
+        assert parse_og_line(bad)[0] == "other"
+
+
+def test_og_device_events_use_arduino_intervals():
+    from device import OgArduinoDevice
+    dev = OgArduinoDevice.__new__(OgArduinoDevice)        # no serial thread
+    import queue as _q
+    from collections import deque as _d
+    dev._events, dev._rx_times, dev._mapper, dev._ard_ms = _q.Queue(), _d(), ClockMapper(), 0.0
+    dev.last_status, dev.ready_received, dev.state, dev.state_fresh = "", False, None, False
+    dev._handle(b"Parkinson's Tremor Monitor Active.\n", 10.0)
+    dev._handle(b"Interval: 500 ms\n", 10.52)               # USB latency varies...
+    dev._handle(b"[.] Moderate Movement\n", 10.52)
+    dev._handle(b"Interval: 250 ms\n", 10.76)
+    ev = dev.drain()
+    assert len(ev) == 2 and ev[1].t - ev[0].t == pytest.approx(0.25)   # ...Arduino timing kept
+    assert dev.last_status == "[.] Moderate Movement" and dev.ready_received

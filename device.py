@@ -605,3 +605,168 @@ class MockDevice:
 
     def close(self) -> None:
         self._streaming = False
+
+
+# --------------------------------------------------------------------------- original sketch
+OG_BAUD = 9600
+OG_BANNER = "Parkinson's Tremor Monitor Active."
+
+
+def parse_og_line(line) -> tuple[str, Optional[float]]:
+    """Original sketch output -> ("interval", ms) | ("status", None) | ("banner"|"other", None)."""
+    if isinstance(line, bytes):
+        line = line.decode("ascii", errors="ignore")
+    s = line.strip()
+    if s.startswith("Interval:"):
+        try:
+            ms = float(s[len("Interval:"):].replace("ms", "").strip())
+        except ValueError:
+            return "other", None
+        return ("interval", ms) if math.isfinite(ms) and ms >= 0 else ("other", None)
+    if s.startswith("["):
+        return "status", None
+    if s == OG_BANNER:
+        return "banner", None
+    return "other", None
+
+
+class OgArduinoDevice:
+    """Read-only link to the team's ORIGINAL tremor-monitor sketch (9600 baud).
+
+    The sketch prints 'Interval: N ms' each time the tilt switch closes (plus a status line
+    such as '[!] Tremor Detected (Fast)') and drives its own LEDs. We turn each closure into
+    an event timed by the Arduino's own intervals. Commands (beep, LED, LCD, metronome) are
+    not supported by that sketch and are ignored. closures_only=True tells the app to count
+    one event = one full flip.
+    """
+
+    closures_only = True
+    sim = False
+
+    def __init__(self, port: Optional[str] = None, clock: Callable[[], float] = time.perf_counter):
+        self._want_port = port
+        self._clock = clock
+        self.port = port or "?"
+        self.connected = False
+        self.ready_received = False
+        self.status = "Looking for Arduino (original sketch)..."
+        self.warning = ""
+        self.state: Optional[int] = None
+        self.state_fresh = False
+        self.last_status = ""                 # the sketch's own text, e.g. "[!] Tremor Detected"
+        self.last_interval_ms: Optional[float] = None
+        self._events: "queue.Queue[float]" = queue.Queue()    # Arduino ms of each closure
+        self._rx_times: deque = deque(maxlen=2000)
+        self._mapper = ClockMapper()
+        self._ard_ms = 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        import serial
+        while not self._stop.is_set():
+            port = self._want_port or find_arduino_port()
+            if port is None:
+                self.status = "Arduino not found - plug in USB"
+                self._stop.wait(RETRY_S)
+                continue
+            try:
+                ser = serial.Serial(port, OG_BAUD, timeout=0.2)
+            except (serial.SerialException, OSError) as exc:
+                self.status = f"Cannot open {port}: {exc}"
+                self._stop.wait(RETRY_S)
+                continue
+            self.port, self.connected = port, True
+            self.status = f"Arduino {port} (original sketch)"
+            self._mapper.reset()
+            self._ard_ms = 0.0
+            buf = b""
+            try:
+                while not self._stop.is_set():
+                    raw = ser.readline()
+                    if not raw:
+                        continue
+                    if not raw.endswith(b"\n"):
+                        buf = (buf + raw)[-256:]
+                        continue
+                    raw, buf = buf + raw, b""
+                    self._handle(raw, self._clock())
+            except Exception as exc:
+                log.error("Serial read failed: %s", exc)
+            finally:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+            self.connected, self.state = False, None
+            if not self._stop.is_set():
+                self.status = f"Arduino disconnected ({self.port}) - plug it back in"
+                self._stop.wait(RETRY_S)
+
+    def _handle(self, raw: bytes, received: float) -> None:
+        self._rx_times.append(received)
+        kind, ms = parse_og_line(raw)
+        if kind == "banner":
+            self.ready_received = True
+            self._mapper.reset()
+            self._ard_ms = 0.0
+        elif kind == "status":
+            self.last_status = raw.decode("ascii", errors="ignore").strip()
+        elif kind == "interval":
+            self._ard_ms += ms                 # Arduino-measured time between closures
+            self._mapper.observe(self._ard_ms, received)
+            self.last_interval_ms = ms
+            self.state, self.state_fresh = 1, True
+            self._events.put(self._ard_ms)     # mapped to PC time at drain (exact intervals)
+
+    # --- telemetry -------------------------------------------------------------------
+    @property
+    def packets_per_sec(self) -> float:
+        now = self._clock()
+        return float(sum(1 for t in list(self._rx_times) if now - t <= 1.0))
+
+    def measure_latency(self, timeout: float = 1.0) -> Optional[float]:
+        return None                            # the original sketch has no request/reply
+
+    # --- shared interface (commands are not supported by the original sketch) ------------
+    def start(self) -> None:
+        self.drain()
+
+    def stop(self) -> None:
+        pass
+
+    def request_state(self) -> None:
+        pass
+
+    def drain(self) -> list[SwitchEvent]:
+        out = []
+        while True:
+            try:
+                out.append(SwitchEvent(self._mapper.to_pc(self._events.get_nowait()), 1))
+            except queue.Empty:
+                return out
+
+    def drain_beats(self) -> list[float]:
+        return []
+
+    def cue_on(self, interval_ms: float) -> None:
+        pass
+
+    def cue_off(self) -> None:
+        pass
+
+    def tempo(self, interval_ms: float) -> None:
+        pass
+
+    def beep(self, n: int = 1) -> None:
+        pass
+
+    def led(self, colour: str) -> None:
+        _check_led(colour)
+
+    def lcd(self, line1: str, line2: str = "") -> None:
+        pass
+
+    def close(self) -> None:
+        self._stop.set()

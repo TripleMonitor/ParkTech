@@ -83,8 +83,12 @@ def reanalyse(rec: dict):
         f = analyze_tapping(p["t"], p["d"])
         return f, score_tapping(f), None
     ev = p["events"]
-    f = analyze_flipping([e[0] for e in ev], [e[1] for e in ev], p["rec_start"], seconds,
-                         initial_state=p["calib"])
+    if rec["meta"].get("closures_only"):
+        from flipping_analysis import analyze_closures
+        f = analyze_closures([e[0] for e in ev], p["rec_start"], seconds)
+    else:
+        f = analyze_flipping([e[0] for e in ev], [e[1] for e in ev], p["rec_start"], seconds,
+                             initial_state=p["calib"])
     worlds = [None if w is None else np.asarray(w) for w in p["world"]]
     ref = None if p["ref_normal"] is None else np.asarray(p["ref_normal"])
     fu = fuse(p["cam_t"], worlds, f.half_flips, p["rec_start"], seconds, ref)

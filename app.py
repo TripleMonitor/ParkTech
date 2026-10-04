@@ -32,8 +32,8 @@ from boot import BootChecks
 from coach_session import CoachSession
 from dashboard import neuroscore, radar_image
 from quality import SignalQuality, signal_quality
-from flipping_analysis import (FlippingFeatures, analyze_flipping, debounce, live_colour,
-                               live_rate)
+from flipping_analysis import (FlippingFeatures, analyze_closures, analyze_flipping, debounce,
+                               live_colour, live_rate)
 from fusion import FusionResult, current_angle, fuse, palm_normal
 from scoring import (ScoreResult, explain_flipping, explain_tapping, explain_tremor,
                      flipping_asymmetry, score_flipping, score_tapping, score_tremor,
@@ -123,6 +123,15 @@ class App:
         self.restart(0.0)
         if boot is not None:
             self.state = "boot"
+
+    @property
+    def closures_only(self) -> bool:
+        """--og: the original sketch reports only switch closures (1 closure = 1 full flip)."""
+        return bool(getattr(self.device, "closures_only", False))
+
+    @property
+    def switch_half_flips(self) -> int:
+        return len(self.flip_times) * (2 if self.closures_only else 1)
 
     @property
     def sim_hand(self) -> bool:
@@ -262,7 +271,7 @@ class App:
             meta = {"session_id": self.session_id, "label": self.label, "hand": hand,
                     "seconds": self.seconds, "timestamp": self.started_at,
                     "mode": "LIVE" if not (self.sim_hand or self.sim_dev) else "SIM",
-                    "dose_hours": self.dose_hours}
+                    "dose_hours": self.dose_hours, "closures_only": self.closures_only}
             r = self.results[(kind, hand)].result
             path = save_record(self.raw_dir, build_record(meta, kind, data, r.score, r.reasons))
             self.raw_msg = f"raw data saved: {os.path.basename(path)}"
@@ -305,6 +314,8 @@ class App:
         return TestResult("tapping", hand, f, r, None, q)
 
     def _flipping_features(self) -> FlippingFeatures:
+        if self.closures_only:
+            return analyze_closures([e.t for e in self.events], self.rec_start, self.seconds)
         return analyze_flipping([e.t for e in self.events], [e.state for e in self.events],
                                 self.rec_start, self.seconds, initial_state=self.calib)
 
@@ -606,7 +617,10 @@ class App:
                 self.device_lost |= not self.device.connected
                 self._update_live_flips(now)
                 self._update_fusion()
-                colour = live_colour(live_rate(self.flip_times, self.clock() - self.rec_start))
+                rate = live_rate(self.flip_times, self.clock() - self.rec_start)
+                if rate is not None and self.closures_only:
+                    rate *= 2                          # live_rate assumes half-flips
+                colour = live_colour(rate)
                 if colour is not None and colour != self._live_led:
                     self._live_led = colour          # LED follows the measured flip speed
                     self.device.led(colour)
@@ -629,6 +643,10 @@ class App:
             self.live_taps = len(detect_taps(t, d)[0])
 
     def _update_live_flips(self, now: float) -> None:
+        if self.closures_only:                 # each closure = one full flip
+            self.flip_times = list(analyze_closures([e.t for e in self.events], self.rec_start,
+                                                    1e9).flip_times)
+            return
         changes = debounce([e.t for e in self.events], [e.state for e in self.events],
                            self.calib)
         self.flip_times = [t - self.rec_start for t, _ in changes if t >= self.rec_start]
@@ -638,7 +656,7 @@ class App:
         if not force and now - self._fuse_at < LIVE_EVERY_S:
             return
         self._fuse_at = now
-        self.fusion = fuse(self.fl_t, self.fl_world, len(self.flip_times), self.rec_start,
+        self.fusion = fuse(self.fl_t, self.fl_world, self.switch_half_flips, self.rec_start,
                            self.seconds, self.flip_ref)
         self.flip_angle = current_angle(self.fl_world[-3:], self.flip_ref)
 
@@ -832,9 +850,12 @@ class App:
                 hud.scan_line(c, 20, 135, 360, 270, self.clock())
         angle = self.flip_angle if self.state == "recording" else None
         ui.rotation_gauge(c, 392, 135, 348, 270, angle, self.fusion if self.state == "recording" else None,
-                          len(self.flip_times))
-        ui.flip_indicator(c, self._palm_down(), 20, 415, 720, 70)
-        ui.tilt_plot(c, self.events, self.calib, self.clock(), 20, 495, 720, 75)
+                          self.switch_half_flips)
+        if self.closures_only:
+            self._draw_og_status(c)
+        else:
+            ui.flip_indicator(c, self._palm_down(), 20, 415, 720, 70)
+            ui.tilt_plot(c, self.events, self.calib, self.clock(), 20, 495, 720, 75)
         if self.state == "ready":
             ui.panel(c, 20, 580, 720, 75)
             ui.centred(c, "Calibrating: hold your hand PALM-DOWN", 612, 0.6, ui.WARN, 2, 20, 740)
@@ -848,6 +869,19 @@ class App:
                 elapsed > STUCK_AFTER_S and not self.flip_times:
             ui.panel(c, 20, 540, 720, 34, (40, 40, 150))
             ui.centred(c, SENSOR_STUCK, 563, 0.55, ui.WHITE, 2, 20, 740)
+
+    def _draw_og_status(self, c) -> None:
+        """--og: show what the original sketch itself reports (it drives its own LEDs)."""
+        dev = self.device
+        st = getattr(dev, "last_status", "") or "waiting for the first tilt..."
+        col = ui.REC if "[!]" in st else ui.WARN if "[.]" in st else ui.OK if "[ ]" in st else ui.DIM
+        ui.panel(c, 20, 415, 720, 155)
+        ui.text(c, "ARDUINO (your original sketch) SAYS", (36, 442), 0.45, ui.ACCENT, 2)
+        ui.text(c, st[:40], (36, 492), 0.9, col, 2)
+        iv = getattr(dev, "last_interval_ms", None)
+        ui.text(c, "last interval: " + ("--" if iv is None else f"{iv:.0f} ms between tilts"),
+                (36, 530), 0.5, ui.GREY)
+        ui.text(c, "its own LEDs: fast / medium / calm", (36, 556), 0.42, ui.DIM)
 
     def _draw_right_column(self, c, big: str, sub: str, colour) -> None:
         kind, hand = self.test
@@ -885,8 +919,10 @@ class App:
         if kind in ("tremor", "tapping"):
             hud.quality_meter(c, self.quality, 770, 558, 490, self.sim_hand)
         else:
-            ui.text(c, f"FLIPS {len(self.flip_times) // 2:3d}", (770, 520), 1.4, ui.OK, 3)
-            ui.text(c, f"{len(self.flip_times)} half-flips (switch)", (770, 556), 0.5, ui.GREY)
+            n = len(self.flip_times) if self.closures_only else len(self.flip_times) // 2
+            ui.text(c, f"FLIPS {n:3d}", (770, 520), 1.4, ui.OK, 3)
+            ui.text(c, "closures from your sketch (1 = 1 full flip)" if self.closures_only
+                    else f"{len(self.flip_times)} half-flips (switch)", (770, 556), 0.5, ui.GREY)
 
     def _draw_done_left(self, c, tr: TestResult) -> None:
         if tr.kind == "tremor":
@@ -1026,7 +1062,13 @@ def build(args):
     from device import ArduinoDevice, MockDevice
     from tapping_tracker import CameraHand, FakeHand
     sim_dev = args.sim or args.sim_device
-    device = MockDevice(test_seconds=args.seconds) if sim_dev else ArduinoDevice(args.port)
+    if sim_dev:
+        device = MockDevice(test_seconds=args.seconds)
+    elif args.og:
+        from device import OgArduinoDevice
+        device = OgArduinoDevice(args.port)
+    else:
+        device = ArduinoDevice(args.port)
     hands = FakeHand(test_seconds=args.seconds) if args.sim else CameraHand(args.camera)
     if not hands.ok:
         log.warning("%s - camera tests will show a message (use --sim for a fake hand)",
@@ -1061,6 +1103,8 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("--sim", action="store_true", help="MockDevice + FakeHand (no hardware)")
     p.add_argument("--sim-device", action="store_true", help="MockDevice + real webcam")
+    p.add_argument("--og", action="store_true",
+                   help="read the team's ORIGINAL tremor-monitor sketch (9600 baud, sensor D11)")
     p.add_argument("--seed-history", action="store_true",
                    help="add 14 days x 2 sessions of DEMO DATA")
     p.add_argument("--port", help="serial port, e.g. COM5 (default: auto-detect)")

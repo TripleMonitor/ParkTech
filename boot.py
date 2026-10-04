@@ -61,9 +61,18 @@ class BootChecks:
             return "FAIL", self.device.status
         return "OK", f"found on {self.device.port}"
 
+    def _og(self) -> bool:
+        return bool(getattr(self.device, "closures_only", False))
+
     def _ready(self):
         if self.device.sim:
             return "SIM", ""
+        if self._og():
+            deadline = time.monotonic() + 3.0
+            while not self.device.ready_received and time.monotonic() < deadline:
+                time.sleep(0.05)
+            return ("OK", "original sketch banner received") if self.device.ready_received \
+                else ("WARN", "no banner yet (press the Uno's reset button)")
         if not self.device.connected:
             return "FAIL", "not connected"
         if self.device.ready_received:
@@ -73,6 +82,8 @@ class BootChecks:
     def _latency(self):
         if self.device.sim:
             return "SIM", ""
+        if self._og():
+            return "WARN", "n/a - the original sketch has no request/reply"
         ms = self.device.measure_latency(1.0)
         if ms is None:
             return "FAIL", "no reply to STATE within 1 s"
@@ -81,6 +92,9 @@ class BootChecks:
     def _tilt(self):
         if self.device.sim:
             return "SIM", f"simulated state {self.device.state}"
+        if self._og():
+            st = self.device.last_status
+            return ("OK", st[:40]) if st else ("WARN", "tilt the sensor once to check")
         if self.device.state is None:
             return "FAIL", "no switch state received"
         return "OK", f"switch reads {self.device.state}"
@@ -88,6 +102,8 @@ class BootChecks:
     def _buzzer(self):
         if self.device.sim:
             return "SIM", ""
+        if self._og():
+            return "WARN", "not in the original sketch"
         if not self.device.connected:
             return "FAIL", "not connected"
         self.device.beep(1)
@@ -96,6 +112,8 @@ class BootChecks:
     def _led(self):
         if self.device.sim:
             return "SIM", ""
+        if self._og():
+            return "OK", "LEDs driven by the original sketch itself"
         if not self.device.connected:
             return "FAIL", "not connected"
         for colour in ("R", "G", "B", "OFF"):

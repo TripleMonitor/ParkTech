@@ -116,3 +116,37 @@ def live_colour(rate: Optional[float]) -> Optional[str]:
     if rate is None:
         return None
     return "G" if rate >= LIVE_GREEN else "Y" if rate >= LIVE_YELLOW else "R"
+
+
+def analyze_closures(times: Sequence[float], t_start: float, duration_s: float,
+                     min_gap: float = MIN_CHANGE_GAP_S) -> FlippingFeatures:
+    """Hand flipping from switch CLOSURES only (the team's original sketch reports one
+    'Interval' line each time the tilt switch closes; it never reports the opening).
+
+    One closure = one full flip (palm down -> up -> down). Intervals are closure-to-closure,
+    i.e. full-flip intervals; CV, decrement and hesitations are computed on those.
+    half_flips is reported as 2 x full flips (each closure implies a complete open/close
+    cycle) so fusion with the camera's half-flip count stays comparable.
+    """
+    ts = sorted(t - t_start for t in times if 0.0 <= t - t_start <= duration_s)
+    kept: list[float] = []
+    for t in ts:                                   # ignore bounce closures < 60 ms apart
+        if not kept or t - kept[-1] >= min_gap:
+            kept.append(t)
+    ft = np.array(kept, dtype=float)
+    n = len(ft)
+    intervals = np.diff(ft)
+    cv, hes, dec = 0.0, 0, 0.0
+    if len(intervals) >= 2:
+        cv = float(intervals.std() / intervals.mean())
+        hes = int((intervals > HESITATION_FACTOR * np.median(intervals)).sum())
+        mids = (ft[:-1] + ft[1:]) / 2
+        r_first = _rate(intervals[mids < EDGE_WINDOW_S])
+        r_last = _rate(intervals[mids > duration_s - EDGE_WINDOW_S])
+        if r_first > 0 and r_last > 0:
+            dec = max(0.0, 1.0 - r_last / r_first)
+    return FlippingFeatures(
+        half_flips=2 * n, full_flips=n,
+        flips_per_sec=n / duration_s if duration_s > 0 else 0.0,
+        interval_cv=cv, decrement=dec, hesitations=hes, duration_s=duration_s,
+        first_change_s=float(ft[0]) if n else None, flip_times=tuple(float(x) for x in ft))

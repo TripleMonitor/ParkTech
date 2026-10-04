@@ -277,3 +277,30 @@ def test_trend_returns_to_previous_screen(tmp_path):
     assert app.state == "trend"
     drive(app, clock, KEY_SPACE)
     assert app.state == "welcome"
+
+
+class FakeOgDevice(MockDevice):
+    """Behaves like the team's original sketch: reports only switch CLOSURES."""
+    closures_only = True
+    last_status = "[.] Moderate Movement"
+    last_interval_ms = 400.0
+
+    def drain(self):
+        return [e for e in super().drain() if e.state == 1]
+
+
+def test_og_mode_counts_closures_as_full_flips(tmp_path):
+    # Bounce-free switch: with closures-only reporting, a bounce while the switch OPENS looks
+    # like an extra closure and cannot be filtered (documented limitation of --og mode).
+    from device import FlipProfile
+    clean = FlipProfile(bounce_p=0.0)
+    NORMAL_FLIPS = clean
+    clock = FakeClock()
+    dev = FakeOgDevice(clock=clock, profiles={"Right": clean, "Left": clean})
+    app, clock = make_app(tmp_path, device=dev, seconds=10.0)
+    dev._clock = clock
+    assert app.closures_only
+    run_to_results(app, clock)
+    f = app.results[("flipping", "Left")].features
+    assert f.flips_per_sec == pytest.approx(NORMAL_FLIPS.rate, rel=0.2)
+    assert app.results[("flipping", "Left")].result.score is not None
