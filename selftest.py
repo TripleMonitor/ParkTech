@@ -1,6 +1,7 @@
 """Headless full-session self-test: MockDevice + FakeHand on a fake clock, no window.
 
-Right hand: 1.5 cm 5 Hz tremor, slow shrinking taps, slow decrementing flips with a pause.
+Right hand: 1.5 cm 5 Hz tremor, slow shrinking taps, slow decrementing flips with a pause
+(camera-only trial: slow, small, shrinking rotations).
 Left hand: no tremor, normal taps, normal flips.
 Usage:  python selftest.py [--screens DIR]      exit code 0 = all PASS
 """
@@ -56,7 +57,8 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
     for k in (ord("2"), ord("."), ord("5")):          # hours since levodopa = 2.5
         tick(k)
     tick(KEY_SPACE)                                   # welcome -> ready (test 1)
-    for i, (kind, hand) in enumerate(TESTS):
+    for i in range(len(TESTS)):
+        kind, hand = app.test
         if app.state != "ready":
             raise RuntimeError(f"expected ready before test {i + 1}, got {app.state}")
         snap(f"02_ready_{kind}_{hand}", tick())
@@ -70,9 +72,10 @@ def run_session(history_path: str, screens_dir: str | None = None, seconds: floa
             if clock.t > 10_000:
                 raise RuntimeError(f"stuck in state {app.state}")
         snap(f"05_done_{kind}_{hand}", tick())
-        if i + 1 < len(TESTS):
-            tick(KEY_SPACE)                           # done -> ready (next test)
-    results_img = tick(KEY_SPACE)                     # last done -> results
+        tick(KEY_SPACE)                               # done -> next ready (or results)
+        if app.state == "results":
+            break
+    results_img = tick()
     snap("06_results", results_img)
     # rhythm coach (C) from the results screen, right hand, full 45 s
     tick(ord("c"))
@@ -125,6 +128,8 @@ def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[st
     rt, lt = score("tremor", "Right"), score("tremor", "Left")
     rp, lp = score("tapping", "Right"), score("tapping", "Left")
     rf, lf = score("flipping", "Right"), score("flipping", "Left")
+    rc, lc = score("flipcam", "Right"), score("flipcam", "Left")
+    lcf = res[("flipcam", "Left")].features
     rows = load_sessions(history_path)
     boot = app.boot
     out = [
@@ -132,7 +137,11 @@ def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[st
          boot is not None and boot.done and len(boot.lines) == 9 and boot.failures == 0
          and all(l.status == "SIM" for l in boot.lines),
          "" if boot is None else ", ".join(l.status for l in boot.lines)),
-        ("All 6 tests completed", len(res) == 6, f"{len(res)} results"),
+        (f"All {len(TESTS)} tests completed", len(res) == len(TESTS), f"{len(res)} results"),
+        ("Camera-only flipping: right worse than left", rc is not None and lc is not None
+         and rc > lc, f"R {rc} vs L {lc}"),
+        ("Camera-only flipping counts the SIM left hand (2.0 flips/s)",
+         abs(lcf.flips_per_sec - 2.0) / 2.0 < 0.2, f"{lcf.flips_per_sec:.2f} full flips/s"),
         ("Right tremor > left tremor", rt is not None and lt is not None and rt > lt,
          f"R {rt} vs L {lt}"),
         ("Right tapping > left tapping", rp is not None and lp is not None and rp > lp,
@@ -145,11 +154,13 @@ def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[st
          f"{res[('tremor', 'Right')].features.peak_hz:.2f} Hz, "
          f"{res[('tremor', 'Right')].features.displacement_cm:.2f} cm"),
         ("Every score has a reason", all(r.result.reasons for r in res.values()), ""),
-        ("Asymmetry flagged (all 3 tests)",
-         all(any(f.startswith(t) for f in app.flags) for t in ("Tremor", "Tapping", "Flipping")),
+        ("Asymmetry flagged (all 4 test types)",
+         all(any(f.startswith(t) for f in app.flags) for t in
+             ("Tremor", "Tapping", "Flipping (camera)", "Flipping (sensor)")),
          f"{len(app.flags)} flag(s)"),
         ("sessions.csv written", len(rows) >= 1 and rows[0]["tremor_R"] == str(rt)
-         and rows[0]["flip_R"] == str(rf) and rows[0]["session_id"] == app.session_id,
+         and rows[0]["flip_R"] == str(rf) and rows[0]["flipcam_R"] == str(rc)
+         and rows[0]["session_id"] == app.session_id,
          f"{len(rows)} row(s)"),
         ("Fusion locked on both hands (camera agrees with switch)",
          all(res[("flipping", h)].fusion is not None and res[("flipping", h)].fusion.locked
@@ -177,8 +188,8 @@ def checks(app: App, dev: MockDevice, history_path: str, trend) -> list[tuple[st
              for k in ("tremor", "tapping") for h in ("Right", "Left")),
          f"{res[('tremor', 'Right')].quality.frames} frames"),
         ("Beeps: 3 countdown + 2 done per test, +3 coach countdown",
-         dev.beeps == 6 * (3 + 2) + 3, f"{dev.beeps} beeps"),
-        ("LED colour from results", dev.last_led == led_for([rt, lt, rp, lp, rf, lf]),
+         dev.beeps == len(TESTS) * (3 + 2) + 3, f"{dev.beeps} beeps"),
+        ("LED colour from results", dev.last_led == led_for([rt, lt, rp, lp, rc, lc, rf, lf]),
          f"LED {dev.last_led}"),
         ("LCD shows scores", dev.last_lcd[0].startswith("R tr") and dev.last_lcd[1].startswith("L tr")
          and all(len(x) <= 16 for x in dev.last_lcd), " / ".join(dev.last_lcd)),

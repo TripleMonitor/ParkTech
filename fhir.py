@@ -1,7 +1,7 @@
 """HL7 FHIR R4 export: a Bundle (type "collection") with a placeholder Patient and one
 Observation per test score and per measured feature.
 
-Codes: NeuroCheck LOCAL codes (system LOCAL_SYSTEM) with display text - no LOINC or
+Codes: ParkTech LOCAL codes (system LOCAL_SYSTEM) with display text - no LOINC or
 SNOMED codes are claimed. Units use UCUM (http://unitsofmeasure.org).
 This is a demo export of a tracking tool, not a clinical record.
 """
@@ -11,7 +11,7 @@ import json
 import uuid
 from typing import Optional
 
-LOCAL_SYSTEM = "urn:neurocheck:local-codes"
+LOCAL_SYSTEM = "urn:parktech:local-codes"
 UCUM = "http://unitsofmeasure.org"
 CATEGORY_SYSTEM = "http://terminology.hl7.org/CodeSystem/observation-category"
 
@@ -22,13 +22,17 @@ FEATURES = {
     "tapping": {"taps_per_sec": ("Finger tap rate", "/s", "taps/s"),
                 "mean_amplitude": ("Finger tap amplitude (normalised)", "1", "ratio"),
                 "decrement": ("Finger tap amplitude decrement", "%", "%")},
+    "flipcam": {"flips_per_sec": ("Hand flip rate (camera only)", "/s", "full flips/s"),
+                "interval_cv": ("Hand flip rhythm CV (camera only)", "1", "ratio"),
+                "median_amplitude_deg": ("Hand flip rotation (camera only)", "deg", "deg")},
     "flipping": {"flips_per_sec": ("Hand flip rate", "/s", "full flips/s"),
                  "interval_cv": ("Hand flip rhythm CV", "1", "ratio"),
                  "median_amplitude_deg": ("Hand flip rotation (camera)", "deg", "deg")},
 }
 TITLES = {"tremor": "Rest tremor score (MDS-UPDRS 3.17 style, demo)",
           "tapping": "Finger tapping score (MDS-UPDRS 3.4 style, demo)",
-          "flipping": "Hand flipping score (MDS-UPDRS 3.6 style, demo)"}
+          "flipcam": "Hand flipping score, camera only (MDS-UPDRS 3.6 style, demo)",
+          "flipping": "Hand flipping score, wrist sensor (MDS-UPDRS 3.6 style, demo)"}
 
 
 def _uuid() -> str:
@@ -61,7 +65,7 @@ def _observation(patient_ref: str, when: str, code: str, display: str, value: Op
     return obs
 
 
-SIM_TAG = {"system": "urn:neurocheck:tags", "code": "SIM",
+SIM_TAG = {"system": "urn:parktech:tags", "code": "SIM",
            "display": "SIMULATION - not measured"}
 
 
@@ -80,7 +84,7 @@ def build_bundle(snapshot: dict) -> dict:
     when = snapshot["timestamp"]
     entries = [{"fullUrl": patient_url, "resource": {
         "resourceType": "Patient", "active": True,
-        "identifier": [{"system": "urn:neurocheck:session", "value": snapshot["session_id"]}],
+        "identifier": [{"system": "urn:parktech:session", "value": snapshot["session_id"]}],
         "name": [{"text": "Demo patient (placeholder)"}]}}]
     for t in snapshot["tests"]:
         kind, hand = t["kind"], t["hand"]

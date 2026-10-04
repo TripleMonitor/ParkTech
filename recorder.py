@@ -5,6 +5,7 @@ to recompute its features and score offline (tools/calibrate.py).
   tapping   frame times + normalised thumb-index distance per frame
   flipping  tilt-switch reports (time, state), palm-down reference state,
             camera frame times + 3D world landmarks, palm-down reference normal
+  flipcam   camera frame times + 3D world landmarks, palm-down reference normal
   all       camera quality lists, the score and reasons the app showed, metadata
             (session, label, hand, test length, mode LIVE/SIM, time)
 
@@ -36,6 +37,11 @@ def build_record(meta: dict, kind: str, data: dict, score: Optional[int], reason
     elif kind == "flipping":
         payload = {"events": [[float(e[0]), int(e[1])] for e in data["events"]],
                    "rec_start": float(data["rec_start"]), "calib": data["calib"],
+                   "cam_t": list(map(float, data["cam_t"])),
+                   "world": [_arr(w) for w in data["world"]],
+                   "ref_normal": _arr(data["ref_normal"])}
+    elif kind == "flipcam":
+        payload = {"rec_start": float(data["rec_start"]),
                    "cam_t": list(map(float, data["cam_t"])),
                    "world": [_arr(w) for w in data["world"]],
                    "ref_normal": _arr(data["ref_normal"])}
@@ -82,6 +88,14 @@ def reanalyse(rec: dict):
     if kind == "tapping":
         f = analyze_tapping(p["t"], p["d"])
         return f, score_tapping(f), None
+    worlds = [None if w is None else np.asarray(w) for w in p["world"]]
+    ref = None if p["ref_normal"] is None else np.asarray(p["ref_normal"])
+    if kind == "flipcam":
+        from flipping_analysis import analyze_half_flips
+        from scoring import score_flipping_camera
+        fu = fuse(p["cam_t"], worlds, 0, p["rec_start"], seconds, ref)
+        f = analyze_half_flips(fu.swing_times, seconds)
+        return f, score_flipping_camera(f, fu), fu
     ev = p["events"]
     if rec["meta"].get("closures_only"):
         from flipping_analysis import analyze_closures
@@ -89,7 +103,5 @@ def reanalyse(rec: dict):
     else:
         f = analyze_flipping([e[0] for e in ev], [e[1] for e in ev], p["rec_start"], seconds,
                              initial_state=p["calib"])
-    worlds = [None if w is None else np.asarray(w) for w in p["world"]]
-    ref = None if p["ref_normal"] is None else np.asarray(p["ref_normal"])
     fu = fuse(p["cam_t"], worlds, f.half_flips, p["rec_start"], seconds, ref)
     return f, score_flipping(f, fu), fu

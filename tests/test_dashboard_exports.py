@@ -9,7 +9,7 @@ from report import save_pdf
 
 
 def snapshot(**over):
-    s = {"session_id": "NC-TEST", "timestamp": "2026-10-03T15:00:00-07:00", "mode": "LIVE",
+    s = {"session_id": "PT-TEST", "timestamp": "2026-10-03T15:00:00-07:00", "mode": "LIVE",
          "dose_hours": 2.5, "neuroscore": 75.0, "neuroscore_formula": "NeuroScore = ...",
          "asymmetry": ["Tremor: Right worse (R 2 vs L 0)"], "coach_rates": {"Right": 2.3},
          "tests": [

@@ -78,7 +78,13 @@ def analyze_flipping(times: Sequence[float], states: Sequence[int], t_start: flo
     """times on any clock (s); only changes inside [t_start, t_start + duration] count."""
     changes = [(t - t_start, s) for t, s in debounce(times, states, initial_state)
                if 0.0 <= t - t_start <= duration_s]
-    ft = np.array([t for t, _ in changes], dtype=float)
+    return analyze_half_flips([t for t, _ in changes], duration_s)
+
+
+def analyze_half_flips(times_rel: Sequence[float], duration_s: float) -> FlippingFeatures:
+    """Features from half-flip times already relative to the test start (switch changes
+    or camera rotation swings). Times outside [0, duration] are ignored."""
+    ft = np.array(sorted(t for t in times_rel if 0.0 <= t <= duration_s), dtype=float)
     half = len(ft)
     first = float(ft[0]) if half else None
     intervals = np.diff(ft)

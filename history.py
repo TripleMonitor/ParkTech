@@ -20,6 +20,7 @@ FIELDS = ["timestamp", "session_id", "mode", "seeded", "dose_hours", "neuroscore
           "tremor_R", "tremor_L", "tremor_R_cm", "tremor_L_cm", "tremor_R_hz", "tremor_L_hz",
           "tap_R", "tap_L", "tap_R_rate", "tap_L_rate", "tap_R_amp", "tap_L_amp",
           "flip_R", "flip_L", "flip_R_rate", "flip_L_rate", "flip_R_amp_deg", "flip_L_amp_deg",
+          "flipcam_R", "flipcam_L", "flipcam_R_rate", "flipcam_L_rate",
           "coach_R_rate", "coach_L_rate",
           "asymmetry"]
 SCORE_KEYS = ("tremor", "tap", "flip")
@@ -254,7 +255,7 @@ def trend_image(sessions: list[dict], width: int = 1280, height: int = 720) -> n
     if not sessions:
         fig.text(0.5, 0.5, "No sessions yet - run one, or start with --seed-history",
                  ha="center", color="white", fontsize=16)
-    title = "NeuroCheck trend  (demo thresholds - tracking aid, not a diagnosis)"
+    title = "ParkTech trend  (demo thresholds - tracking aid, not a diagnosis)"
     fig.suptitle(title, color="white", fontsize=13)
     if any_demo:
         fig.text(0.5, 0.925, "hollow markers = DEMO DATA / SIM (not measured)", ha="center",

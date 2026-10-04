@@ -237,6 +237,8 @@ class FakeHand:
         self.flip_state = None            # callable -> (state, palm_down_state) or None
         self.flip_amp_deg = {"Right": 105.0, "Left": 165.0}
         self.flip_amp_shrink = {"Right": 0.45, "Left": 0.0}
+        # camera-only flipping (no switch to follow): the palm flips on its own
+        self.flip_rate = {"Right": 1.1, "Left": 2.0}       # full flips/s
         self._angle = 0.0
         self._angle_t = None
         self._rng = random.Random(seed)
@@ -284,15 +286,24 @@ class FakeHand:
             return HandFrame(frame, self.palm_at(now, hand), hand, 1.0, t=now)
         if test == "flipping":
             return self._flipping_frame(frame, now, hand)._replace(t=now)
+        if test == "flipcam":
+            return self._flipping_frame(frame, now, hand, autonomous=True)._replace(t=now)
         return HandFrame(frame, self.landmarks_for(self.distance_at(now, hand)), hand, 1.0, t=now)
 
-    def _flipping_frame(self, frame: np.ndarray, now: float, hand: str) -> HandFrame:
-        """Palm rotating about the forearm axis, following the (simulated) tilt switch."""
+    def _flipping_frame(self, frame: np.ndarray, now: float, hand: str,
+                        autonomous: bool = False) -> HandFrame:
+        """Palm rotating about the forearm axis, following the (simulated) tilt switch, or
+        (autonomous, camera-only trial) flipping by itself at flip_rate[hand] once the
+        countdown is over."""
         target = 0.0
-        if self.flip_state is not None:
+        frac = min(1.0, max(0.0, now - self._t0) / self._seconds)
+        amp = self.flip_amp_deg.get(hand, 160.0) * (1 - self.flip_amp_shrink.get(hand, 0.0) * frac)
+        if autonomous:
+            t = now - self._t0
+            half_period = 0.5 / self.flip_rate.get(hand, 1.5)
+            target = amp if t > 0 and int(t / half_period) % 2 == 0 else 0.0
+        elif self.flip_state is not None:
             state, down = self.flip_state()
-            frac = min(1.0, max(0.0, now - self._t0) / self._seconds)
-            amp = self.flip_amp_deg.get(hand, 160.0) * (1 - self.flip_amp_shrink.get(hand, 0.0) * frac)
             target = amp if (state is not None and down is not None and state != down) else 0.0
         dt = 0.0 if self._angle_t is None else max(0.0, now - self._angle_t)
         self._angle_t = now

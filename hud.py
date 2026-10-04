@@ -14,7 +14,7 @@ import numpy as np
 import ui
 from quality import MAX_DROPPED, MIN_CONFIDENCE, MIN_DETECTED, SignalQuality
 
-VERSION = "NEUROCHECK v1.0"
+VERSION = "PARKTECH v1.1"
 HEADER_H = 50
 TELEMETRY_H = 28
 HINT_Y = ui.H - TELEMETRY_H - 8           # baseline of the disclaimer / key-hint line
@@ -26,8 +26,14 @@ def header(c, session_id: str, hand: Optional[str], live: bool, status: str,
            status_ok: bool) -> None:
     cv2.rectangle(c, (0, 0), (ui.W, HEADER_H), ui.PANEL, -1)
     cv2.line(c, (0, HEADER_H), (ui.W, HEADER_H), ui.ACCENT, 1)
-    ui.text(c, VERSION, (18, 33), 0.75, ui.ACCENT, 2)
-    x = 18 + ui.text_width(VERSION, 0.75, 2) + 28
+    lw = ui.logo(c, 8, 5, HEADER_H - 10)
+    if lw:
+        x = 8 + lw + 12
+        ui.text(c, VERSION.split()[-1], (x, 33), 0.45, ui.DIM)
+        x += ui.text_width(VERSION.split()[-1], 0.45) + 24
+    else:
+        ui.text(c, VERSION, (18, 33), 0.75, ui.ACCENT, 2)
+        x = 18 + ui.text_width(VERSION, 0.75, 2) + 28
     for label, value in (("SESSION", session_id), ("HAND", hand or "-")):
         ui.text(c, label, (x, 21), 0.38, ui.DIM)
         ui.text(c, value, (x, 41), 0.55, ui.WHITE)
@@ -86,6 +92,7 @@ def footer_line(c, hints: str) -> None:
 
 def boot_screen(c, checks, now: float) -> None:
     ui.panel(c, 140, 90, 1000, 540)
+    ui.logo(c, 1140 - 18 - ui.logo_width(52), 104, 52)
     ui.text(c, "SYSTEM SELF-CHECK", (175, 140), 0.9, ui.ACCENT, 2)
     ui.text(c, "every line is a live check; hardware lines show SIM in simulation",
             (175, 168), 0.42, ui.DIM)
@@ -141,4 +148,4 @@ def scan_line(c, x: int, y: int, w: int, h: int, now: float, period: float = 2.0
 
 
 def session_id() -> str:
-    return datetime.now().strftime("NC-%y%m%d-%H%M%S")
+    return datetime.now().strftime("PT-%y%m%d-%H%M%S")

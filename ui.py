@@ -113,6 +113,35 @@ def paste(canvas, img, x: int, y: int, w: int, h: int) -> None:
     canvas[y:y + h, x:x + w] = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
 
 
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+
+
+@functools.lru_cache(maxsize=8)
+def _logo(name: str, h: int) -> Optional[np.ndarray]:
+    img = cv2.imread(os.path.join(ASSETS, name), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    w = round(img.shape[1] * h / img.shape[0])
+    return cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+
+
+def logo_width(h: int, icon: bool = False) -> int:
+    img = _logo("parktech_icon.png" if icon else "parktech_logo.png", h)
+    return 0 if img is None else img.shape[1]
+
+
+def logo(canvas, x: int, y: int, h: int, icon: bool = False) -> int:
+    """Paste the ParkTech logo (or square icon) with top-left (x, y); x < 0 = centred.
+    Returns the drawn width (0 if the asset is missing - the caller's text still reads)."""
+    img = _logo("parktech_icon.png" if icon else "parktech_logo.png", h)
+    if img is None:
+        return 0
+    w = img.shape[1]
+    x = (W - w) // 2 if x < 0 else x
+    canvas[y:y + h, x:x + w] = img
+    return w
+
+
 def panel(canvas, x: int, y: int, w: int, h: int, colour=PANEL, brackets: bool = True,
           accent=ACCENT) -> None:
     """Filled panel with a thin border and HUD corner brackets."""
@@ -316,8 +345,9 @@ DIM_OK = (70, 140, 60)
 
 
 def rotation_gauge(canvas, x: int, y: int, w: int, h: int, angle: Optional[float],
-                   fusion, switch_half: int) -> None:
-    """Half-dial 0..180 deg (palm down -> palm up) + camera/switch fusion status."""
+                   fusion, switch_half: int, camera_only: bool = False) -> None:
+    """Half-dial 0..180 deg (palm down -> palm up) + camera/switch fusion status
+    (camera_only: no switch - the camera swing count IS the measurement)."""
     panel(canvas, x, y, w, h)
     text(canvas, "PALM ROTATION (camera)", (x + 12, y + 22), 0.42, ACCENT, 2)
     cx, cy, r = x + w // 2, y + 150, min(w // 2 - 30, 105)
@@ -340,10 +370,14 @@ def rotation_gauge(canvas, x: int, y: int, w: int, h: int, angle: Optional[float
         text(canvas, "no hand", (x + w - 16 - text_width("no hand", 0.5), y + 24), 0.5, DIM)
     yy = cy + 48
     cam = "--" if fusion is None or not fusion.camera_ok else str(fusion.camera_half_flips)
-    text(canvas, f"half-flips  switch {switch_half:3d}  camera {cam:>3}", (x + 12, yy), 0.42, GREY)
+    text(canvas, f"half-flips  camera {cam:>3}" if camera_only else
+         f"half-flips  switch {switch_half:3d}  camera {cam:>3}", (x + 12, yy), 0.42, GREY)
     if fusion is not None and fusion.camera_ok and fusion.median_amplitude_deg:
         text(canvas, f"median swing {fusion.median_amplitude_deg:4.0f} deg", (x + 12, yy + 20), 0.42, GREY)
-    if fusion is None:
+    if camera_only:
+        status, col = (("CAMERA LOST - keep hand in view", REC) if fusion is not None
+                       and not fusion.camera_ok else ("CAMERA ONLY: swings >= 45 deg", ACCENT))
+    elif fusion is None:
         status, col = "FUSION: waiting", DIM
     elif not fusion.camera_ok:
         status, col = "CAMERA LOST - switch only", WARN

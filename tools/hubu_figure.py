@@ -67,7 +67,7 @@ def main() -> int:
     mcv, tcv, pcv, _ = cross_validate(clips)
     conf(fig.add_subplot(2, 2, 3), t0, p0, "original demo thresholds", m0)
     conf(fig.add_subplot(2, 2, 4), tcv, pcv, "tuned thresholds (5-fold CV by participant)", mcv)
-    fig.suptitle(f"NeuroCheck finger tapping vs clinicians - HUBU-FIS dataset, {len(clips)} videos, "
+    fig.suptitle(f"ParkTech finger tapping vs clinicians - HUBU-FIS dataset, {len(clips)} videos, "
                  f"{len({c.participant for c in clips})} people (CC-BY-4.0)", fontsize=13)
     fig.tight_layout()
     os.makedirs("docs", exist_ok=True)

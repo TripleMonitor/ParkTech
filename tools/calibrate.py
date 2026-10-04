@@ -50,7 +50,8 @@ def features_of(kind: str, f, fu) -> dict:
            "decrement": f.decrement, "hesitations": f.hesitations}
     if fu is not None and fu.camera_ok and fu.camera_half_flips:
         out["rotation_deg"] = fu.median_amplitude_deg
-        out["fusion_locked"] = float(fu.locked)
+        if kind == "flipping":
+            out["fusion_locked"] = float(fu.locked)
     return out
 
 
@@ -112,7 +113,7 @@ def suggestions(test: str, normal: list[dict]) -> list[str]:
 
 
 def report(rows: list[dict]) -> str:
-    lines = ["NeuroCheck calibration report (healthy volunteers + acted runs; NOT clinical data)", ""]
+    lines = ["ParkTech calibration report (healthy volunteers + acted runs; NOT clinical data)", ""]
     if not rows:
         return "\n".join(lines + ["no recordings found - run app.py --record --label NAME"])
     sims = sum(r["mode"] != "LIVE" for r in rows)
@@ -121,7 +122,7 @@ def report(rows: list[dict]) -> str:
     changed = [r for r in rows if r["score"] != r["app_score"]]
     lines.append(f"{len(rows)} recordings; {len(changed)} would score differently with the current "
                  "code than when recorded")
-    for test in ("tremor", "tapping", "flipping"):
+    for test in ("tremor", "tapping", "flipcam", "flipping"):
         rs = [r for r in rows if r["test"] == test]
         if not rs:
             continue

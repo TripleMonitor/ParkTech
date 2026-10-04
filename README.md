@@ -1,4 +1,4 @@
-# NeuroCheck — Parkinson's Motor Check Station
+# ParkTech — Parkinson's Motor Check Station
 
 A tabletop check-up with three tests per hand, each scored 0–4 with every rule shown:
 **rest tremor** (webcam), **finger tapping** (webcam) and **rapid hand flipping** (SW-520D tilt
@@ -119,7 +119,7 @@ it is not clinical validation (that needs patients scored by a neurologist).
 - **NeuroScore** = 100 × (1 − Σ scores / (4 × scored tests)). Composite tracking index.
 
 ## 6b. Validation on real patients (finger tapping)
-Public **HUBU-FIS** dataset (University of Burgos; Zenodo 10.5281/zenodo.17738775, CC-BY-4.0):
+Public **HUBU-FIS** dataset (University of Burgos, https://doi.org/10.5281/zenodo.17738775; Zenodo 10.5281/zenodo.17738775, CC-BY-4.0):
 234 phone videos, 118 people (controls + Parkinson's), each hand rated by clinicians on
 MDS-UPDRS 3.4. The app's own MediaPipe settings and tapping maths were run on every video:
 

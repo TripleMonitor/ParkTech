@@ -77,7 +77,7 @@ class BootChecks:
             return "FAIL", "not connected"
         if self.device.ready_received:
             return "OK", "READY received"
-        return "WARN", "no READY - is the NeuroCheck firmware uploaded?"
+        return "WARN", "no READY - is the ParkTech firmware (firmware/neurocheck) uploaded?"
 
     def _latency(self):
         if self.device.sim:

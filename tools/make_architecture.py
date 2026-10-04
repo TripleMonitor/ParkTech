@@ -44,7 +44,7 @@ def main() -> str:
     ax.set_xlim(0, 16)
     ax.set_ylim(0, 9)
     ax.axis("off")
-    ax.text(0.5, 8.45, "NeuroCheck architecture", color=TXT, fontsize=24, weight="bold")
+    ax.text(0.5, 8.45, "ParkTech architecture", color=TXT, fontsize=24, weight="bold")
     ax.text(0.5, 8.05, "every number on screen is measured live or labelled SIM / DEMO DATA  -  "
                        "tracking & decision support, not a diagnosis", color=DIM, fontsize=11)
     col_w, gap, x0 = 3.45, 0.42, 0.5

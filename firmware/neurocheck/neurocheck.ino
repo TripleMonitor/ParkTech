@@ -1,4 +1,4 @@
-// NeuroCheck firmware - Arduino Uno
+// ParkTech firmware (formerly NeuroCheck) - Arduino Uno
 // SW-520D tilt switch (hand flipping), buzzer, 3 separate LEDs (green/yellow/red),
 // optional LCD1602. No IMU.
 //
@@ -295,7 +295,7 @@ void setup() {
   rawChangedMs = millis();
   digitalWrite(PIN_MIRROR, stableState ? HIGH : LOW);
   lcdInit();
-  lcdShow("NeuroCheck|Ready");
+  lcdShow("ParkTech|Ready");
   Serial.println(F("READY"));
 }
 

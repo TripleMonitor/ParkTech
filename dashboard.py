@@ -19,6 +19,17 @@ AXES = ("Tremor", "Finger tapping", "Hand flipping", "Rhythm coach")
 COACH_REF_RATE = 4.0           # beats/s mapped to 100% on the radar (demo reference)
 
 
+def merge_flipping(scores: dict) -> dict:
+    """One hand-flipping score per hand: the wrist-sensor trial ("flipping") when it was
+    scored, else the camera-only trial ("flipcam"). Keeps NeuroScore at 3 tests x 2 hands
+    so running both trials doesn't double-weight flipping."""
+    out = {k: v for k, v in scores.items() if k[0] != "flipcam"}
+    for (kind, hand), s in scores.items():
+        if kind == "flipcam" and out.get(("flipping", hand)) is None:
+            out[("flipping", hand)] = s
+    return out
+
+
 def neuroscore(scores: dict) -> tuple[Optional[float], str]:
     """scores: {(kind, hand): score or None}. Returns (value 0-100 or None, formula text)."""
     real = [s for s in scores.values() if s is not None]

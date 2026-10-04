@@ -1,4 +1,4 @@
-# NeuroCheck — Parkinson's Motor Check Station
+# ParkTech — Parkinson's Motor Check Station
 A tabletop check-up with three tests per hand, each scored 0–4 with transparent rules shown on
 screen: rest tremor (webcam), finger tapping (webcam), rapid hand flipping (SW-520D tilt switch +
 webcam fusion). Plus a PID rhythm coach, a results dashboard and exports.
@@ -39,8 +39,13 @@ flips/s, yellow >= 1.0, red below); after the session = worst score (green 0-1, 
 
 ## Session flow
 Boot self-check -> Welcome (asks hours since last levodopa dose) -> Right tremor -> Left tremor
--> Right finger tapping -> Left finger tapping -> Right hand flipping -> Left hand flipping
--> Results (6 cards) -> Dashboard (radar + NeuroScore) -> Trend.
+-> Right finger tapping -> Left finger tapping -> Right/Left hand flipping CAMERA ONLY (flipcam)
+-> Right/Left hand flipping WITH WRIST SENSOR (skipped, recorded as not scored, when
+device.connected is False) -> Results (8 cards) -> Dashboard (radar + NeuroScore) -> Trend.
+Camera-only trial: half-flips = camera rotation swings >= 45 deg (fusion.swings), same rules
+as the sensor trial (scoring.score_flipping_camera); not scored if hand seen < 50% of frames.
+NeuroScore/radar/LCD use ONE flipping score per hand (dashboard.merge_flipping: sensor if
+scored, else camera). Branding: assets/parktech_logo.png + parktech_icon.png (ui.logo).
 Each test: Ready screen, 3-2-1 countdown with beeps, 10 s recording, "done" beep, WHY THIS SCORE
 panel. Keys: SPACE next, R restart (any screen), Q quit, H trend, C rhythm coach,
 P doctor PDF / F FHIR JSON (results/dashboard), sim only: T fake tremor, F stuck sensor.

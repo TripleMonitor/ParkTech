@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import textwrap
 
-from dashboard import radar_image
+from dashboard import merge_flipping, radar_image
 
 TITLES = {"tremor": "Rest tremor (3.17)", "tapping": "Finger tapping (3.4)",
-          "flipping": "Hand flipping (3.6)"}
+          "flipcam": "Hand flipping - camera (3.6)",
+          "flipping": "Hand flipping - wrist sensor (3.6)"}
 
 
 def save_pdf(snapshot: dict, sessions: list[dict], path: str) -> str:
@@ -19,7 +20,7 @@ def save_pdf(snapshot: dict, sessions: list[dict], path: str) -> str:
     from history import neuroscore_series
 
     fig = plt.figure(figsize=(8.27, 11.69))            # A4 portrait
-    fig.text(0.06, 0.965, "NeuroCheck - motor check summary", fontsize=16, weight="bold")
+    fig.text(0.06, 0.965, "ParkTech - motor check summary", fontsize=16, weight="bold")
     if snapshot.get("mode", "LIVE") != "LIVE":
         fig.text(0.70, 0.965, "SIMULATION - NOT MEASURED", fontsize=12, weight="bold",
                  color="#b00020")
@@ -44,7 +45,7 @@ def save_pdf(snapshot: dict, sessions: list[dict], path: str) -> str:
         for r in flags:                      # never dropped by the 4-line limit below
             fig.text(0.08, y, r[:110], fontsize=7, weight="bold", color="#a05a00")
             y -= 0.0115
-        for r in [r for r in t["reasons"] if not r.startswith("LOW CONFIDENCE")][:4]:
+        for r in [r for r in t["reasons"] if not r.startswith("LOW CONFIDENCE")][:3]:
             for line in textwrap.wrap(r, 95)[:2]:
                 fig.text(0.08, y, "- " + line, fontsize=7)
                 y -= 0.0115
@@ -56,7 +57,7 @@ def save_pdf(snapshot: dict, sessions: list[dict], path: str) -> str:
             fig.text(0.08, y, "- " + f, fontsize=7, color="#a05a00")
             y -= 0.0115
 
-    rad = radar_image({(t["kind"], t["hand"]): t["score"] for t in snapshot["tests"]},
+    rad = radar_image(merge_flipping({(t["kind"], t["hand"]): t["score"] for t in snapshot["tests"]}),
                       snapshot.get("coach_rates", {}), 520, 440, "Motor fingerprint")
     ax_r = fig.add_axes([0.52, 0.05, 0.44, 0.30])
     ax_r.imshow(rad[:, :, ::-1])

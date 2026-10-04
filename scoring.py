@@ -171,6 +171,27 @@ def score_flipping(f: FlippingFeatures, fusion: Optional[FusionResult] = None) -
     return ScoreResult(min(3, len(problems)), problems + note)
 
 
+CAMERA_NOT_TRACKED = "Hand not tracked by the camera"
+
+
+def score_flipping_camera(f: FlippingFeatures, fusion: Optional[FusionResult]) -> ScoreResult:
+    """Camera-only hand flipping (no wrist sensor): half-flips = camera rotation swings
+    >= 45 deg; same rules as the sensor trial (rate, rhythm, slowdown, hesitations,
+    rotation size). Not scored if the camera saw the hand in < 50% of frames."""
+    if fusion is None or not fusion.camera_ok:
+        seen = 0.0 if fusion is None else fusion.visible
+        return ScoreResult(None, [f"{CAMERA_NOT_TRACKED} ({seen:.0%} of frames, need 50%) - "
+                                  "not scored; keep the whole hand in view"])
+    if f.half_flips == 0:
+        return ScoreResult(4, [f"No flips seen by the camera in {f.duration_s:.0f} s "
+                               f"(rotations < 45 deg do not count)"])
+    r = score_flipping(f, fusion)
+    reasons = [x for x in r.reasons if not x.startswith("Note: no flip in the first")]
+    if f.stuck_at_start:
+        reasons.append(f"Note: no flip seen in the first {NO_CHANGE_WARN_S:g} s")
+    return ScoreResult(r.score, reasons)
+
+
 # --------------------------------------------------------------------------- asymmetry
 def _differs(a: float, b: float) -> float:
     big = max(abs(a), abs(b))
@@ -213,8 +234,8 @@ def tapping_asymmetry(rf: TappingFeatures, lf: TappingFeatures,
 
 
 def flipping_asymmetry(rf: FlippingFeatures, lf: FlippingFeatures,
-                       rs: ScoreResult, ls: ScoreResult) -> list[str]:
-    return asymmetry("Flipping", rs, ls, "flips/s", rf.flips_per_sec, lf.flips_per_sec,
+                       rs: ScoreResult, ls: ScoreResult, name: str = "Flipping") -> list[str]:
+    return asymmetry(name, rs, ls, "flips/s", rf.flips_per_sec, lf.flips_per_sec,
                      compare_feature=_both_scored(rs, ls))
 
 

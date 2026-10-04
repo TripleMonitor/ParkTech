@@ -214,7 +214,7 @@ class ArduinoDevice:
             if self.warning.startswith("No READY"):
                 self.warning = ""
         else:
-            self.warning = f"No READY from {port} - is the NeuroCheck firmware uploaded?"
+            self.warning = f"No READY from {port} - is the ParkTech firmware (firmware/neurocheck) uploaded?"
             log.warning(self.warning)
         with self._ser_lock:
             self._ser = ser

@@ -1,7 +1,7 @@
 """App state machine tests, headless, on a fake clock."""
 import pytest
 
-from app import KEY_SPACE, TESTS, App, led_for
+from app import KEY_SPACE, SENSOR_SKIP, TESTS, App, led_for
 from device import MockDevice
 from selftest import FakeClock, checks, run_session
 from tapping_tracker import FakeHand, HandFrame
@@ -36,6 +36,8 @@ def make_app(tmp_path, device=None, hands=None, seconds=2.0):
 def run_to_results(app, clock):
     drive(app, clock, KEY_SPACE)                 # welcome -> ready
     for i in range(len(TESTS)):
+        if app.state == "results":               # wrist-sensor trials skipped
+            break
         assert app.state == "ready"
         drive(app, clock, KEY_SPACE)             # ready -> countdown
         n = 0
@@ -114,15 +116,35 @@ class DeadDevice(MockDevice):
         return []
 
 
-def test_disconnected_arduino_does_not_crash(tmp_path):
+def test_no_wrist_sensor_skips_sensor_trials(tmp_path):
     clock = FakeClock()
     app, clock = make_app(tmp_path, device=DeadDevice(clock=clock))
     img = drive(app, clock)
     assert img.shape == (720, 1280, 3)
     run_to_results(app, clock)
+    for hand in ("Right", "Left"):
+        r = app.results[("flipping", hand)].result
+        assert r.score is None and r.reasons == [SENSOR_SKIP]
+        assert app.results[("flipcam", hand)].result.score is not None   # camera trial ran
+    assert app.results[("tremor", "Right")].result.score is not None
+    assert len(app.results) == len(TESTS)
+    ns, formula = app._neuroscore()           # flipping comes from the camera trial
+    assert ns is not None and "flipping" not in formula
+
+
+def test_sensor_lost_during_sensor_trial_is_unscored(tmp_path):
+    app, clock = make_app(tmp_path)
+    drive(app, clock, KEY_SPACE)
+    while app.test[0] != "flipping" or app.state != "ready":
+        drive(app, clock, KEY_SPACE if app.state in ("ready", "done") else -1)
+    drive(app, clock, KEY_SPACE)
+    while app.state != "recording":
+        drive(app, clock)
+    app.device.connected = False
+    while app.state != "done":
+        drive(app, clock)
     r = app.results[("flipping", "Right")].result
     assert r.score is None and any("disconnected" in s for s in r.reasons)
-    assert app.results[("tremor", "Right")].result.score is not None   # camera still works
 
 
 class NoHand(FakeHand):

@@ -1,4 +1,4 @@
-# NeuroCheck — Verification
+# ParkTech — Verification
 
 Run on Windows 11, Python 3.11.15 (.venv), arduino-cli 1.5.1 / arduino:avr 1.8.8, 2026-10-03.
 Raw outputs are in `verification/`. Screenshots are in `screenshots/`.
